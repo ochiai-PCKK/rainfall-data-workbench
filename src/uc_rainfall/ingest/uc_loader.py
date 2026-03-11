@@ -35,8 +35,15 @@ def _resolve_bundle(root: Path, source_path: Path, dataset_id: str | None = None
     ]
     mail_text_path = next((path for path in mail_candidates if path.exists()), None)
 
+    if dataset_id is not None:
+        resolved_dataset_id = dataset_id
+    elif source_path.is_file():
+        resolved_dataset_id = source_path.stem
+    else:
+        resolved_dataset_id = root.name
+
     return UcInputBundle(
-        dataset_id=dataset_id or root.name,
+        dataset_id=resolved_dataset_id,
         source_path=source_path,
         input_dir=root,
         rain_dat_path=rain_dat_path,

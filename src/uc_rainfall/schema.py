@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS polygons (
   miny REAL NOT NULL,
   maxx REAL NOT NULL,
   maxy REAL NOT NULL,
+  geometry_wkt TEXT NOT NULL,
   file_path TEXT NOT NULL
 );
 
@@ -51,6 +52,11 @@ CREATE TABLE IF NOT EXISTS polygon_cell_map (
   polygon_id TEXT NOT NULL,
   row INTEGER NOT NULL,
   col INTEGER NOT NULL,
+  polygon_local_row INTEGER,
+  polygon_local_col INTEGER,
+  cell_area REAL,
+  overlap_area REAL,
+  overlap_ratio REAL,
   inside_flag INTEGER NOT NULL,
   selection_method TEXT NOT NULL,
   PRIMARY KEY (dataset_id, polygon_id, row, col),

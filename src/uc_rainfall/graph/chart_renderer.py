@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.transforms import blended_transform_factory
 
 from .metrics import LABEL_INTERVAL_HOURS, METRIC_WINDOWS, TOTAL_WINDOW_HOURS
 
@@ -58,6 +59,64 @@ def _nice_step(max_value: float, n_ticks: int) -> float:
     return nice * magnitude
 
 
+def _font_sizes(fig) -> dict[str, float]:
+    """図サイズに応じて文字サイズを緩やかに調整する。"""
+    scale = min(fig.get_figwidth() / 14.0, fig.get_figheight() / 6.0)
+    return {
+        "title": 13 * scale,
+        "axis": 11 * scale,
+        "tick": 8 * scale,
+        "date": 8.5 * scale,
+        "legend": 9 * scale,
+    }
+
+
+def _style_datetime_axis(ax, times: pd.Series, *, label_interval: int, font_sizes: dict[str, float]) -> None:
+    """X軸を1段表示で整え、日付境界線と上部の日付注記を描画する。"""
+    def _tick_formatter(value, _pos) -> str:
+        dt = mdates.num2date(value)
+        return dt.strftime("%H:%M")
+
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=label_interval))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(_tick_formatter))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha="center", fontsize=font_sizes["tick"])
+    ax.tick_params(axis="x", which="both", length=0)
+
+    start = pd.Timestamp(times.min()).floor("h")
+    end = pd.Timestamp(times.max()).ceil("h")
+    day_starts = pd.date_range(start.normalize(), end.normalize(), freq="D")
+    line_transform = blended_transform_factory(ax.transData, ax.transAxes)
+    half_h = timedelta(minutes=30)
+
+    ax.set_xlim(start - half_h, end + half_h)
+
+    for day_start in day_starts:
+        boundary = day_start - half_h
+        if not (start - half_h <= boundary <= end + half_h):
+            continue
+
+        ax.text(
+            boundary,
+            1.01,
+            day_start.strftime("%Y.%m.%d"),
+            transform=line_transform,
+            ha="center",
+            va="bottom",
+            fontsize=font_sizes["date"],
+            clip_on=False,
+        )
+        ax.plot(
+            [boundary, boundary],
+            [0.0, 1.0],
+            transform=line_transform,
+            color="black",
+            linewidth=0.9,
+            alpha=0.5,
+            zorder=1,
+            clip_on=False,
+        )
+
+
 def render_metric_chart(
     frame: pd.DataFrame,
     *,
@@ -75,17 +134,26 @@ def render_metric_chart(
     if window.empty:
         raise ValueError(f"イベント {event_time} 周辺のデータがありません: metric={metric}")
 
+    full_index = pd.date_range(pd.Timestamp(start).floor("h"), pd.Timestamp(end).floor("h"), freq="h")
+    window = (
+        window.set_index("observed_at")
+        .reindex(full_index)
+        .rename_axis("observed_at")
+        .reset_index()
+    )
+
     window["rainfall_mm"] = pd.to_numeric(window["rainfall_mm"], errors="coerce").fillna(0.0)
     window["cumulative_mm"] = window["rainfall_mm"].cumsum()
     if "quality" in window.columns:
-        window["quality"] = window["quality"].fillna("normal")
+        window["quality"] = window["quality"].fillna("missing")
     else:
-        window["quality"] = "normal"
+        window["quality"] = "missing"
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax1 = plt.subplots(figsize=(14, 6))
+    font_sizes = _font_sizes(fig)
     times = window["observed_at"]
     rainfall = window["rainfall_mm"].to_numpy()
     cumulative = window["cumulative_mm"].to_numpy()
@@ -131,23 +199,22 @@ def render_metric_chart(
     ax2.set_yticks(right_ticks)
     ax2.set_ylim(0, right_ticks[-1])
 
-    ax1.set_title(title, fontsize=14, fontweight="bold", pad=12)
-    ax1.set_xlabel("観測時刻 (JST)")
-    ax1.set_ylabel("時間雨量 (mm)", color=_BAR_COLOR, fontsize=11)
+    ax1.set_title(title, fontsize=font_sizes["title"], fontweight="bold", y=1.085, pad=2)
+    ax1.set_ylabel("時間雨量 (mm)", color=_BAR_COLOR, fontsize=font_sizes["axis"])
     ax1.tick_params(axis="y", labelcolor=_BAR_COLOR)
-    ax2.set_ylabel("累加雨量 (mm)", color=_LINE_COLOR, fontsize=11)
+    ax2.set_ylabel("累加雨量 (mm)", color=_LINE_COLOR, fontsize=font_sizes["axis"])
     ax2.tick_params(axis="y", labelcolor=_LINE_COLOR)
 
-    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=LABEL_INTERVAL_HOURS[metric]))
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d\n%H:%M"))
-    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=0, ha="center", fontsize=8)
+    _style_datetime_axis(ax1, times, label_interval=LABEL_INTERVAL_HOURS[metric], font_sizes=font_sizes)
 
     handles1, labels1 = ax1.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(handles1 + handles2, labels1 + labels2, loc="upper left", fontsize=9)
+    ax1.legend(handles1 + handles2, labels1 + labels2, loc="upper left", fontsize=font_sizes["legend"])
     ax1.grid(axis="y", alpha=0.3)
 
-    fig.autofmt_xdate()
+    ax1.set_xlabel("観測時刻 (JST)", fontsize=font_sizes["axis"], labelpad=12)
+    ax1.set_xlim(start - timedelta(minutes=30), end + timedelta(minutes=30))
+    fig.subplots_adjust(bottom=0.17, top=0.80)
     fig.tight_layout()
     fig.savefig(output, dpi=150, bbox_inches="tight")
     plt.close(fig)

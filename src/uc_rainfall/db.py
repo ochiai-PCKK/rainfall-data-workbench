@@ -33,6 +33,26 @@ def open_db(db_path: str | Path):
 def initialize_schema(conn: sqlite3.Connection) -> None:
     """必要なテーブルとインデックスを作成する。"""
     conn.executescript(SCHEMA_SQL)
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(polygon_cell_map)").fetchall()
+    }
+    if "polygon_local_row" not in existing_columns:
+        conn.execute("ALTER TABLE polygon_cell_map ADD COLUMN polygon_local_row INTEGER")
+    if "polygon_local_col" not in existing_columns:
+        conn.execute("ALTER TABLE polygon_cell_map ADD COLUMN polygon_local_col INTEGER")
+    if "cell_area" not in existing_columns:
+        conn.execute("ALTER TABLE polygon_cell_map ADD COLUMN cell_area REAL")
+    if "overlap_area" not in existing_columns:
+        conn.execute("ALTER TABLE polygon_cell_map ADD COLUMN overlap_area REAL")
+    if "overlap_ratio" not in existing_columns:
+        conn.execute("ALTER TABLE polygon_cell_map ADD COLUMN overlap_ratio REAL")
+    polygon_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(polygons)").fetchall()
+    }
+    if "geometry_wkt" not in polygon_columns:
+        conn.execute("ALTER TABLE polygons ADD COLUMN geometry_wkt TEXT")
 
 
 def upsert_dataset(conn: sqlite3.Connection, record: DatasetRecord) -> None:
@@ -108,8 +128,10 @@ def upsert_polygons(conn: sqlite3.Connection, polygons: Iterable[PolygonRecord])
     """流域ポリゴンのメタ情報を登録または更新する。"""
     conn.executemany(
         """
-        INSERT INTO polygons(polygon_id, polygon_name, polygon_group, polygon_crs, minx, miny, maxx, maxy, file_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO polygons(
+          polygon_id, polygon_name, polygon_group, polygon_crs, minx, miny, maxx, maxy, geometry_wkt, file_path
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(polygon_id) DO UPDATE SET
           polygon_name=excluded.polygon_name,
           polygon_group=excluded.polygon_group,
@@ -118,6 +140,7 @@ def upsert_polygons(conn: sqlite3.Connection, polygons: Iterable[PolygonRecord])
           miny=excluded.miny,
           maxx=excluded.maxx,
           maxy=excluded.maxy,
+          geometry_wkt=excluded.geometry_wkt,
           file_path=excluded.file_path
         """,
         (
@@ -130,6 +153,7 @@ def upsert_polygons(conn: sqlite3.Connection, polygons: Iterable[PolygonRecord])
                 polygon.miny,
                 polygon.maxx,
                 polygon.maxy,
+                polygon.geometry_wkt,
                 polygon.file_path,
             )
             for polygon in polygons
@@ -140,14 +164,17 @@ def upsert_polygons(conn: sqlite3.Connection, polygons: Iterable[PolygonRecord])
 def replace_polygon_cell_map(
     conn: sqlite3.Connection,
     dataset_id: str,
-    rows: Iterable[tuple[str, int, int, int, str]],
+    rows: Iterable[tuple[str, int, int, int, int, float, float, float, int, str]],
 ) -> None:
     """指定 `dataset_id` の流域-セル対応表を全置換する。"""
     conn.execute("DELETE FROM polygon_cell_map WHERE dataset_id = ?", (dataset_id,))
     conn.executemany(
         """
-        INSERT INTO polygon_cell_map(dataset_id, polygon_id, row, col, inside_flag, selection_method)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO polygon_cell_map(
+          dataset_id, polygon_id, row, col, polygon_local_row, polygon_local_col,
+          cell_area, overlap_area, overlap_ratio, inside_flag, selection_method
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         ((dataset_id, *row) for row in rows),
     )

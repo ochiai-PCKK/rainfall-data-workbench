@@ -4,6 +4,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
+from shapely import wkt as shapely_wkt
 
 from ..models import PolygonRecord
 
@@ -28,11 +29,12 @@ def _build_combined_polygon(
             f"CRS が異なるため結合できません: {COMBINED_COMPONENTS[0]}={left_crs}, {COMBINED_COMPONENTS[1]}={right_crs}"
         )
 
-    combined_frame = gpd.GeoDataFrame(
-        pd.concat([left, right], ignore_index=True),
+    combined_geometry = gpd.GeoSeries(
+        pd.concat([left.geometry, right.geometry], ignore_index=True),
         crs=left.crs,
-    )
-    minx, miny, maxx, maxy = combined_frame.total_bounds.tolist()
+    ).union_all()
+    combined_frame = gpd.GeoDataFrame({"geometry": [combined_geometry]}, crs=left.crs)
+    minx, miny, maxx, maxy = combined_geometry.bounds
     record = PolygonRecord(
         polygon_id=COMBINED_POLYGON_NAME,
         polygon_name=COMBINED_POLYGON_NAME,
@@ -42,6 +44,7 @@ def _build_combined_polygon(
         miny=miny,
         maxx=maxx,
         maxy=maxy,
+        geometry_wkt=combined_geometry.wkt,
         file_path=str(root),
     )
     return record, combined_frame
@@ -66,7 +69,9 @@ def load_polygons(polygon_dir: str | Path) -> tuple[list[PolygonRecord], dict[st
         gdf = gpd.read_file(path)
         if gdf.empty:
             continue
-        minx, miny, maxx, maxy = gdf.total_bounds.tolist()
+        geometry = gdf.geometry.union_all()
+        minx, miny, maxx, maxy = geometry.bounds
+        normalized = gpd.GeoDataFrame({"geometry": [geometry]}, crs=gdf.crs)
         record = PolygonRecord(
             polygon_id=polygon_name,
             polygon_name=polygon_name,
@@ -76,10 +81,11 @@ def load_polygons(polygon_dir: str | Path) -> tuple[list[PolygonRecord], dict[st
             miny=miny,
             maxx=maxx,
             maxy=maxy,
+            geometry_wkt=geometry.wkt,
             file_path=str(path),
         )
         records.append(record)
-        frames[polygon_name] = gdf
+        frames[polygon_name] = normalized
 
     combined = _build_combined_polygon(frames, root)
     if combined is not None:
@@ -89,4 +95,37 @@ def load_polygons(polygon_dir: str | Path) -> tuple[list[PolygonRecord], dict[st
 
     if not records:
         raise ValueError(f"有効なポリゴンが見つかりません: {root}")
+    return records, frames
+
+
+def load_polygons_from_db(conn) -> tuple[list[PolygonRecord], dict[str, gpd.GeoDataFrame]]:
+    """DB に登録済みのポリゴンを復元する。"""
+    rows = conn.execute(
+        """
+        SELECT polygon_id, polygon_name, polygon_group, polygon_crs, minx, miny, maxx, maxy, geometry_wkt, file_path
+        FROM polygons
+        ORDER BY polygon_name
+        """
+    ).fetchall()
+    if not rows:
+        raise ValueError("DB に利用可能なポリゴンが登録されていません。--polygon-dir を指定してください。")
+
+    records: list[PolygonRecord] = []
+    frames: dict[str, gpd.GeoDataFrame] = {}
+    for row in rows:
+        record = PolygonRecord(
+            polygon_id=row["polygon_id"],
+            polygon_name=row["polygon_name"],
+            polygon_group=row["polygon_group"],
+            polygon_crs=row["polygon_crs"],
+            minx=row["minx"],
+            miny=row["miny"],
+            maxx=row["maxx"],
+            maxy=row["maxy"],
+            geometry_wkt=row["geometry_wkt"],
+            file_path=row["file_path"],
+        )
+        geometry = shapely_wkt.loads(record.geometry_wkt)
+        frames[record.polygon_id] = gpd.GeoDataFrame({"geometry": [geometry]}, crs=record.polygon_crs)
+        records.append(record)
     return records, frames

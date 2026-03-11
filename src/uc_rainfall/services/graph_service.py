@@ -8,6 +8,7 @@ import re
 import pandas as pd
 
 from ..db import open_db
+from .candidate_service import _build_canonical_candidate_cells, list_candidate_cells
 from ..graph import add_metric_columns, find_metric_events, render_metric_chart
 
 LOGGER = logging.getLogger(__name__)
@@ -31,25 +32,12 @@ def _grid_matches(left: pd.Series, right: pd.Series, *, tol: float = 1e-6) -> bo
     )
 
 
-def _load_compatible_dataset_ids(
-    frame: pd.DataFrame,
-    *,
-    anchor_dataset_id: str,
-) -> list[str]:
-    """起点データセットと同じ格子定義を持つ `dataset_id` 一覧を返す。"""
-    anchor = frame.loc[frame["dataset_id"] == anchor_dataset_id]
-    if anchor.empty:
-        raise ValueError(f"格子定義が見つかりません: dataset_id={anchor_dataset_id}")
-    anchor_row = anchor.iloc[0]
-
-    compatible = [
-        row["dataset_id"]
-        for _, row in frame.iterrows()
-        if _grid_matches(row, anchor_row)
-    ]
-
-    compatible_sorted = [anchor_dataset_id] + sorted(dataset_id for dataset_id in compatible if dataset_id != anchor_dataset_id)
-    return compatible_sorted
+def _sort_dataset_ids(dataset_ids: list[str], *, anchor_dataset_id: str | None) -> list[str]:
+    """優先データセットを先頭にして dataset_id 一覧を整列する。"""
+    unique_ids = list(dict.fromkeys(dataset_ids))
+    if anchor_dataset_id is None or anchor_dataset_id not in unique_ids:
+        return sorted(unique_ids)
+    return [anchor_dataset_id] + sorted(dataset_id for dataset_id in unique_ids if dataset_id != anchor_dataset_id)
 
 
 def _fetch_compatible_frames(
@@ -102,6 +90,199 @@ def _fetch_compatible_frames(
         ),
     )
     return frame, compatible_dataset_ids
+
+
+def _load_dataset_grids(conn) -> pd.DataFrame:
+    """登録済み格子定義を取得する。"""
+    return pd.read_sql_query(
+        """
+        SELECT dataset_id, grid_crs, origin_x, origin_y, cell_width, cell_height, rows, cols
+        FROM grids
+        """,
+        conn,
+    )
+
+
+def _load_compatible_dataset_ids_for_dataset(
+    conn,
+    *,
+    dataset_id: str,
+) -> list[str]:
+    """指定 dataset と同じ格子定義を持つ dataset 一覧を返す。"""
+    grids = _load_dataset_grids(conn)
+    anchor = grids.loc[grids["dataset_id"] == dataset_id]
+    if anchor.empty:
+        raise ValueError(f"格子定義が見つかりません: dataset_id={dataset_id}")
+    anchor_row = anchor.iloc[0]
+    compatible = [
+        row["dataset_id"]
+        for _, row in grids.iterrows()
+        if _grid_matches(row, anchor_row)
+    ]
+    return _sort_dataset_ids(compatible, anchor_dataset_id=dataset_id)
+
+
+def _load_candidate_cell_table(
+    conn,
+    *,
+    polygon_name: str,
+    dataset_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """候補セル一覧を座標付きで取得する。"""
+    sql = """
+    SELECT
+      pcm.dataset_id,
+      p.polygon_name,
+      pcm.row,
+      pcm.col,
+      pcm.polygon_local_row,
+      pcm.polygon_local_col,
+      c.x_center,
+      c.y_center,
+      pcm.inside_flag
+    FROM polygon_cell_map pcm
+    JOIN polygons p ON p.polygon_id = pcm.polygon_id
+    JOIN (
+      SELECT dataset_id, row, col, MIN(x_center) AS x_center, MIN(y_center) AS y_center
+      FROM cell_timeseries
+      GROUP BY dataset_id, row, col
+    ) c
+      ON c.dataset_id = pcm.dataset_id
+     AND c.row = pcm.row
+     AND c.col = pcm.col
+    WHERE p.polygon_name = ?
+    """
+    params: list[object] = [polygon_name]
+    if dataset_ids:
+        placeholders = ",".join("?" for _ in dataset_ids)
+        sql += f" AND pcm.dataset_id IN ({placeholders})"
+        params.extend(dataset_ids)
+    sql += " ORDER BY pcm.dataset_id, pcm.row, pcm.col"
+    return pd.read_sql_query(sql, conn, params=params)
+
+
+def _resolve_anchor_cell(
+    conn,
+    *,
+    dataset_id: str | None,
+    polygon_name: str,
+    row: int | None,
+    col: int | None,
+    local_row: int | None,
+    local_col: int | None,
+) -> tuple[int, int, int, int, float, float]:
+    """起点セルを source row/col または流域内 row/col から解決する。"""
+    dataset_ids = [dataset_id] if dataset_id is not None else None
+    frame = _load_candidate_cell_table(conn, polygon_name=polygon_name, dataset_ids=dataset_ids)
+    if frame.empty:
+        raise ValueError(f"流域 {polygon_name} の候補セルが見つかりません")
+
+    filtered = frame
+    if row is not None and col is not None:
+        filtered = filtered[(filtered["row"] == row) & (filtered["col"] == col)]
+    elif local_row is not None and local_col is not None:
+        canonical = _build_canonical_candidate_cells(frame)
+        matched = canonical[
+            (canonical["polygon_local_row"] == local_row)
+            & (canonical["polygon_local_col"] == local_col)
+        ]
+        if matched.empty:
+            raise ValueError(f"流域内行列 ({local_row}, {local_col}) に一致する候補セルが見つかりません")
+        target = matched.iloc[0]
+        filtered = frame[
+            (frame["x_center"].sub(float(target["x_center"])).abs() <= 1e-6)
+            & (frame["y_center"].sub(float(target["y_center"])).abs() <= 1e-6)
+        ]
+    else:
+        raise ValueError("cell モードでは --row/--col または --local-row/--local-col の指定が必要です")
+
+    if filtered.empty:
+        raise ValueError(f"指定セルが流域 {polygon_name} の候補セルに見つかりません")
+    if len(filtered) > 1 and dataset_id is None:
+        filtered = filtered.sort_values(["dataset_id", "row", "col"]).head(1)
+    elif len(filtered) > 1:
+        raise ValueError("指定セルが一意に定まりません")
+
+    item = filtered.iloc[0]
+    canonical = _build_canonical_candidate_cells(frame)
+    canonical_match = canonical[
+        (canonical["x_center"].sub(float(item["x_center"])).abs() <= 1e-6)
+        & (canonical["y_center"].sub(float(item["y_center"])).abs() <= 1e-6)
+    ]
+    if canonical_match.empty:
+        raise ValueError("流域内ローカル行列番号を解決できません")
+    local_item = canonical_match.iloc[0]
+    return (
+        int(item["row"]),
+        int(item["col"]),
+        int(local_item["polygon_local_row"]),
+        int(local_item["polygon_local_col"]),
+        float(item["x_center"]),
+        float(item["y_center"]),
+    )
+
+
+def _find_position_matched_cells(
+    conn,
+    *,
+    polygon_name: str,
+    anchor_x: float,
+    anchor_y: float,
+    dataset_ids: list[str] | None = None,
+    tol: float = 1e-6,
+) -> pd.DataFrame:
+    """流域内候補セルの中から、起点セルと同じ中心座標を持つセルを探す。"""
+    frame = _load_candidate_cell_table(conn, polygon_name=polygon_name, dataset_ids=dataset_ids)
+    if frame.empty:
+        raise ValueError(f"流域 {polygon_name} の候補セルが見つかりません")
+
+    matched = frame[
+        (frame["x_center"].sub(anchor_x).abs() <= tol)
+        & (frame["y_center"].sub(anchor_y).abs() <= tol)
+    ].copy()
+    if matched.empty:
+        raise ValueError("同一位置に一致する候補セルが見つかりません")
+
+    counts = matched.groupby("dataset_id").size()
+    duplicates = counts[counts > 1]
+    if not duplicates.empty:
+        raise ValueError(f"同一 dataset 内で位置一致セルが複数見つかりました: {duplicates.to_dict()}")
+    return matched
+
+
+def _fetch_position_matched_frames(
+    conn,
+    *,
+    matched_cells: pd.DataFrame,
+    calc_start: datetime,
+    view_end: datetime,
+) -> tuple[pd.DataFrame, list[str]]:
+    """位置一致したセル群の時系列を取得する。"""
+    frames: list[pd.DataFrame] = []
+    dataset_ids: list[str] = []
+    for item in matched_cells.itertuples(index=False):
+        dataset_ids.append(str(item.dataset_id))
+        part = pd.read_sql_query(
+            """
+            SELECT dataset_id, observed_at, rainfall_mm, quality
+            FROM cell_timeseries
+            WHERE dataset_id = ? AND row = ? AND col = ? AND observed_at BETWEEN ? AND ?
+            ORDER BY observed_at
+            """,
+            conn,
+            params=(
+                item.dataset_id,
+                int(item.row),
+                int(item.col),
+                calc_start.isoformat(timespec="seconds"),
+                view_end.isoformat(timespec="seconds"),
+            ),
+        )
+        frames.append(part)
+
+    if not frames:
+        return pd.DataFrame(), []
+    return pd.concat(frames, ignore_index=True), dataset_ids
 
 
 def _deduplicate_rows(
@@ -169,6 +350,9 @@ def _build_continuous_hourly_frame(
             aligned["quality"] = aligned.get("quality")
             aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].isna(), "quality"] = "missing"
             aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].notna(), "quality"] = "normal"
+            if "overlap_ratio" in indexed.columns:
+                ratio_series = pd.to_numeric(indexed["overlap_ratio"], errors="coerce").dropna()
+                aligned["overlap_ratio"] = ratio_series.iloc[0] if not ratio_series.empty else float("nan")
             if not isinstance(keys, tuple):
                 keys = (keys,)
             for column, value in zip(group_cols, keys):
@@ -189,19 +373,20 @@ def _build_continuous_hourly_frame(
     return aligned.reset_index()
 
 
-def _load_candidate_cells(conn, *, dataset_id: str, polygon_name: str) -> pd.DataFrame:
+def _load_candidate_cells(conn, *, dataset_id: str | None, polygon_name: str) -> pd.DataFrame:
     """指定流域に属する候補セル一覧を DB から取得する。"""
-    frame = pd.read_sql_query(
-        """
-        SELECT pcm.row, pcm.col
-        FROM polygon_cell_map pcm
-        JOIN polygons p ON p.polygon_id = pcm.polygon_id
-        WHERE pcm.dataset_id = ? AND p.polygon_name = ?
-        ORDER BY pcm.row, pcm.col
-        """,
-        conn,
-        params=(dataset_id, polygon_name),
-    )
+    sql = """
+    SELECT pcm.dataset_id, pcm.row, pcm.col
+    FROM polygon_cell_map pcm
+    JOIN polygons p ON p.polygon_id = pcm.polygon_id
+    WHERE p.polygon_name = ?
+    """
+    params: list[object] = [polygon_name]
+    if dataset_id is not None:
+        sql += " AND pcm.dataset_id = ?"
+        params.append(dataset_id)
+    sql += " ORDER BY pcm.dataset_id, pcm.row, pcm.col"
+    frame = pd.read_sql_query(sql, conn, params=params)
     if frame.empty:
         raise ValueError(f"流域 {polygon_name} の候補セルが見つかりません")
     return frame
@@ -210,20 +395,20 @@ def _load_candidate_cells(conn, *, dataset_id: str, polygon_name: str) -> pd.Dat
 def _fetch_polygon_frames(
     *,
     conn,
-    compatible_dataset_ids: list[str],
-    anchor_dataset_id: str,
+    dataset_ids: list[str],
+    anchor_dataset_id: str | None,
     polygon_name: str,
     calc_start: datetime,
     view_end: datetime,
 ) -> pd.DataFrame:
     """指定流域に属する全候補セルの時系列を取得する。"""
-    placeholders = ",".join("?" for _ in compatible_dataset_ids)
+    placeholders = ",".join("?" for _ in dataset_ids)
     return pd.read_sql_query(
         f"""
-        SELECT c.dataset_id, c.observed_at, c.row, c.col, c.rainfall_mm, c.quality
+        SELECT c.dataset_id, c.observed_at, c.row, c.col, c.rainfall_mm, c.quality, pcm.overlap_ratio
         FROM cell_timeseries c
         JOIN polygon_cell_map pcm
-          ON pcm.dataset_id = ? AND pcm.row = c.row AND pcm.col = c.col
+          ON pcm.dataset_id = c.dataset_id AND pcm.row = c.row AND pcm.col = c.col
         JOIN polygons p
           ON p.polygon_id = pcm.polygon_id
         WHERE c.dataset_id IN ({placeholders})
@@ -233,8 +418,7 @@ def _fetch_polygon_frames(
         """,
         conn,
         params=(
-            anchor_dataset_id,
-            *compatible_dataset_ids,
+            *dataset_ids,
             polygon_name,
             calc_start.isoformat(timespec="seconds"),
             view_end.isoformat(timespec="seconds"),
@@ -249,6 +433,23 @@ def _aggregate_polygon_frame(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
         rainfall = grouped["rainfall_mm"].agg(lambda s: s.sum(min_count=1))
     elif mode == "polygon_mean":
         rainfall = grouped["rainfall_mm"].mean()
+    elif mode == "polygon_weighted_sum":
+        rainfall = grouped.apply(
+            lambda g: (
+                pd.to_numeric(g["rainfall_mm"], errors="coerce")
+                * pd.to_numeric(g["overlap_ratio"], errors="coerce")
+            ).sum(min_count=1)
+        )
+    elif mode == "polygon_weighted_mean":
+        def _weighted_mean(group: pd.DataFrame):
+            values = pd.to_numeric(group["rainfall_mm"], errors="coerce")
+            weights = pd.to_numeric(group["overlap_ratio"], errors="coerce")
+            valid = values.notna() & weights.notna()
+            if not bool(valid.any()):
+                return float("nan")
+            return float((values[valid] * weights[valid]).sum() / weights[valid].sum())
+
+        rainfall = grouped.apply(_weighted_mean)
     else:
         raise ValueError(f"未対応の集計モードです: {mode}")
 
@@ -266,10 +467,12 @@ def _aggregate_polygon_frame(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
 def generate_metric_event_charts(
     *,
     db_path: str | Path,
-    dataset_id: str,
+    dataset_id: str | None,
     polygon_name: str,
     row: int | None,
     col: int | None,
+    local_row: int | None,
+    local_col: int | None,
     series_mode: str,
     view_start: datetime,
     view_end: datetime,
@@ -278,32 +481,57 @@ def generate_metric_event_charts(
     """指定セルまたは流域集計系列から最大イベントグラフ群を出力する。"""
     calc_start = view_start - timedelta(hours=48)
     with open_db(db_path) as conn:
-        grids = pd.read_sql_query(
-            """
-            SELECT dataset_id, grid_crs, origin_x, origin_y, cell_width, cell_height, rows, cols
-            FROM grids
-            """,
-            conn,
-        )
-        compatible_dataset_ids = _load_compatible_dataset_ids(grids, anchor_dataset_id=dataset_id)
         if series_mode == "cell":
-            if row is None or col is None:
-                raise ValueError("--series-mode=cell のときは --row と --col が必須です")
-            frame, compatible_dataset_ids = _fetch_compatible_frames(
+            resolved_row, resolved_col, resolved_local_row, resolved_local_col, anchor_x, anchor_y = _resolve_anchor_cell(
                 conn=conn,
                 dataset_id=dataset_id,
                 polygon_name=polygon_name,
                 row=row,
                 col=col,
+                local_row=local_row,
+                local_col=local_col,
+            )
+            if dataset_id is not None:
+                dataset_ids = _load_compatible_dataset_ids_for_dataset(conn, dataset_id=dataset_id)
+            else:
+                dataset_ids = None
+            matched_cells = _find_position_matched_cells(
+                conn,
+                polygon_name=polygon_name,
+                anchor_x=anchor_x,
+                anchor_y=anchor_y,
+                dataset_ids=dataset_ids,
+            )
+            frame, compatible_dataset_ids = _fetch_position_matched_frames(
+                conn,
+                matched_cells=matched_cells,
                 calc_start=calc_start,
                 view_end=view_end,
             )
+            row = resolved_row
+            col = resolved_col
+            local_row = resolved_local_row
+            local_col = resolved_local_col
+            compatible_dataset_ids = _sort_dataset_ids(compatible_dataset_ids, anchor_dataset_id=dataset_id)
+            LOGGER.info(
+                "位置一致セルを使用します: x_center=%s y_center=%s 一致データセット=%s",
+                anchor_x,
+                anchor_y,
+                compatible_dataset_ids,
+            )
         else:
-            candidate_cells = _load_candidate_cells(conn, dataset_id=dataset_id, polygon_name=polygon_name)
+            candidate_cells = _load_candidate_cells(
+                conn,
+                dataset_id=dataset_id if dataset_id is not None else None,
+                polygon_name=polygon_name,
+            )
+            compatible_dataset_ids = (
+                [dataset_id] if dataset_id is not None else sorted(candidate_cells["dataset_id"].drop_duplicates().tolist())
+            )
             LOGGER.info("流域集計を実行します: polygon=%s 候補セル数=%s mode=%s", polygon_name, len(candidate_cells), series_mode)
             frame = _fetch_polygon_frames(
                 conn=conn,
-                compatible_dataset_ids=compatible_dataset_ids,
+                dataset_ids=compatible_dataset_ids,
                 anchor_dataset_id=dataset_id,
                 polygon_name=polygon_name,
                 calc_start=calc_start,
@@ -318,10 +546,12 @@ def generate_metric_event_charts(
     frame["rainfall_mm"] = pd.to_numeric(frame["rainfall_mm"], errors="coerce")
     frame = frame.dropna(subset=["observed_at"]).sort_values("observed_at").reset_index(drop=True)
     if series_mode == "cell":
-        frame = _deduplicate_rows(frame, anchor_dataset_id=dataset_id, subset_cols=["observed_at"])
+        anchor_for_dedup = dataset_id or compatible_dataset_ids[0]
+        frame = _deduplicate_rows(frame, anchor_dataset_id=anchor_for_dedup, subset_cols=["observed_at"])
         frame = _build_continuous_hourly_frame(frame, start_at=calc_start, end_at=view_end)
     else:
-        frame = _deduplicate_rows(frame, anchor_dataset_id=dataset_id, subset_cols=["observed_at", "row", "col"])
+        anchor_for_dedup = dataset_id or compatible_dataset_ids[0]
+        frame = _deduplicate_rows(frame, anchor_dataset_id=anchor_for_dedup, subset_cols=["observed_at", "row", "col"])
         frame = _build_continuous_hourly_frame(
             frame,
             start_at=calc_start,
@@ -332,18 +562,26 @@ def generate_metric_event_charts(
     frame = add_metric_columns(frame)
 
     output_paths: list[Path] = []
+    output_dataset_token = dataset_id or "all"
     for event in find_metric_events(frame, view_start=view_start, view_end=view_end):
         event_stamp = event.occurred_at.strftime("%Y%m%dT%H%M%SJST")
         if series_mode == "cell":
             filename = (
-                f"{_safe_token(dataset_id)}_{_safe_token(polygon_name)}_"
-                f"r{row}_c{col}_{event.metric}_{event_stamp}.png"
+                f"{_safe_token(output_dataset_token)}_{_safe_token(polygon_name)}_"
+                f"lr{local_row}_lc{local_col}_{event.metric}_{event_stamp}.png"
             )
-            title = f"{polygon_name} row={row} col={col} {event.metric}最大雨量"
+            title = f"{polygon_name} セル[{local_row},{local_col}] {event.metric}最大雨量"
         else:
-            suffix = "全セル合計" if series_mode == "polygon_sum" else "全セル平均"
+            if series_mode == "polygon_sum":
+                suffix = "全セル合計"
+            elif series_mode == "polygon_mean":
+                suffix = "全セル単純平均"
+            elif series_mode == "polygon_weighted_sum":
+                suffix = "全セル重み付き合計"
+            else:
+                suffix = "全セル重み付き平均"
             filename = (
-                f"{_safe_token(dataset_id)}_{_safe_token(polygon_name)}_"
+                f"{_safe_token(output_dataset_token)}_{_safe_token(polygon_name)}_"
                 f"{_safe_token(suffix)}_{event.metric}_{event_stamp}.png"
             )
             title = f"{polygon_name} {suffix} {event.metric}最大雨量"

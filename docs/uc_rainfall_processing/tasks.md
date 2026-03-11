@@ -94,15 +94,17 @@
 
 ### T10. 候補セル抽出実装
 
-- セル中心座標から BBox 内候補を絞る処理を実装する
-- `point-in-polygon` 判定を実装する
-- `center_in_polygon` 方式で採用セルを決定する
+- セルポリゴン BBox と流域 BBox の重なりで候補を絞る処理を実装する
+- セルポリゴンと流域ポリゴンの `intersects` 判定を実装する
+- `cell_intersects_polygon` 方式で採用セルを決定する
 
 
 ### T11. polygon_cell_map 保存処理実装
 
 - `polygon_cell_map` への保存処理を実装する
 - `dataset_id + polygon_id + row + col` の一意性を守る
+- `polygon_local_row`, `polygon_local_col` を算出して保存する
+- `cell_area`, `overlap_area`, `overlap_ratio` を算出して保存する
 
 
 ### T12. ingest サービス統合
@@ -125,6 +127,7 @@
 - `list-cells` コマンドを実装する
 - 一覧形式で候補セルを表示する
 - 並び順を `polygon_name`, `row`, `col` にそろえる
+- `polygon_local_row`, `polygon_local_col` も表示する
 
 
 ## 5. フェーズ2: グラフ生成
@@ -132,11 +135,13 @@
 ### T15. 時系列取得実装
 
 - `dataset_id + row + col` でセル時系列を取得する
+- `dataset_id + polygon_local_row + polygon_local_col` でも起点セルを解決できるようにする
 - 同一格子定義を持つ複数 `dataset_id` を特定する
 - 可視化時に同一格子の `dataset_id` を結合して時系列を作る
+- セル単位では `x_center/y_center` 一致セルだけを結合する
 - `view_start`, `view_end` を受け取る
 - `calc_start` を内部計算して必要期間を読み出す
-- `polygon_sum`, `polygon_mean` の流域集計時系列を取得できるようにする
+- `polygon_sum`, `polygon_mean`, `polygon_weighted_sum`, `polygon_weighted_mean` の流域集計時系列を取得できるようにする
 
 
 ### T16. rolling 指標計算実装

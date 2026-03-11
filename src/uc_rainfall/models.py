@@ -38,6 +38,7 @@ class PolygonRecord:
     miny: float
     maxx: float
     maxy: float
+    geometry_wkt: str
     file_path: str
 
 

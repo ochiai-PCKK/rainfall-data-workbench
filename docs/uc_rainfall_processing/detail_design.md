@@ -186,14 +186,15 @@ CREATE TABLE polygons (
   minx REAL NOT NULL,
   miny REAL NOT NULL,
   maxx REAL NOT NULL,
-  maxy REAL NOT NULL
+  maxy REAL NOT NULL,
+  geometry_wkt TEXT NOT NULL
 );
 ```
 
 備考:
 
-- 初期実装では geometry 本体は DB に保存しない
-- geometry は gpkg/shp 側から都度読む
+- 初期実装では geometry 本体を `geometry_wkt` として DB に保存する
+- 元ファイルパスも保持し、必要に応じてファイル側とも照合できるようにする
 
 
 ### 4.5 polygon_cell_map
@@ -210,6 +211,11 @@ CREATE TABLE polygon_cell_map (
   polygon_id TEXT NOT NULL,
   row INTEGER NOT NULL,
   col INTEGER NOT NULL,
+  polygon_local_row INTEGER,
+  polygon_local_col INTEGER,
+  cell_area REAL,
+  overlap_area REAL,
+  overlap_ratio REAL,
   inside_flag INTEGER NOT NULL,
   selection_method TEXT NOT NULL,
   PRIMARY KEY (dataset_id, polygon_id, row, col),
@@ -228,7 +234,8 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 備考:
 
 - `inside_flag` は `0/1`
-- 初期実装の `selection_method` は `center_in_polygon`
+- 初期実装の `selection_method` は `cell_intersects_polygon`
+- `overlap_ratio` は `overlap_area / cell_area`
 
 
 ## 5. フェーズ1 詳細設計
@@ -250,6 +257,7 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 - ZIP 入力時は一時ディレクトリへ展開して処理する
 - `mail_txt.txt` が存在しない場合は、TIFF の GeoTransform から格子定義を取得する
+- 初期実装では複数入力パスを順次取り込める
 
 
 ### 5.2 処理順
@@ -315,21 +323,22 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - セル高
 - `row`, `col`
 
-初期実装ではセル中心のみを保持し、セルポリゴン自体は保持しない。
+初期実装ではセル中心座標を保持し、空間判定時にはセルポリゴンも内部生成して用いる。
 
 
 ### 5.6 空間判定
 
 初期実装の空間判定:
 
-1. ポリゴン BBox 内のセル中心を候補化
-2. `point-in-polygon` で確定
+1. ポリゴン BBox とセルポリゴン BBox の重なりで候補化
+2. セルポリゴンと流域ポリゴンの `intersects` 判定で確定
 
 判定結果:
 
 - 採用セルは `polygon_cell_map` へ保存
 - `inside_flag=1`
-- `selection_method='center_in_polygon'`
+- `selection_method='cell_intersects_polygon'`
+- `cell_timeseries` には採用セルに対応する時系列だけを保存する
 
 
 ### 5.7 重複登録判定
@@ -371,17 +380,21 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 入力パラメータ:
 
-- `dataset_id`
+- `dataset_id`（任意）
 - `polygon_id` または `polygon_name`
 - `row`
 - `col`
+- `local_row`
+- `local_col`
 - `view_start`
 - `view_end`
 - 出力ディレクトリ
 
 備考:
 
-- `row`, `col` は候補ビューで確認した値を指定する
+- `local_row`, `local_col` を優先的な指定方法とする
+- `row`, `col` は内部処理互換のため残す
+- `dataset_id` 未指定時は、位置一致する全データセットを対象にする
 
 
 ### 6.2 候補ビュー
@@ -393,9 +406,12 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - `polygon_name`
 - `row`
 - `col`
+- `polygon_local_row`
+- `polygon_local_col`
 - `x_center`
 - `y_center`
 - `inside_flag`
+- `overlap_ratio`
 
 出力順:
 
@@ -417,6 +433,8 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - `cell`
 - `polygon_sum`
 - `polygon_mean`
+- `polygon_weighted_sum`
+- `polygon_weighted_mean`
 
 `cell` の場合は `row`, `col` 指定を必須とする。
 `polygon_sum`, `polygon_mean` の場合は流域内候補セル全体を対象にする。
@@ -439,6 +457,7 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 同一格子定義を持つ複数 `dataset_id` が存在する場合は、可視化時にそれらを結合対象とする。
 格子一致判定は `grid_crs`, `origin_x`, `origin_y`, `cell_width`, `cell_height`, `rows`, `cols` の一致で行う。
+セル単位グラフでは、さらに同一流域内で `x_center`, `y_center` が一致する候補セルのみを結合対象とする。
 
 
 ### 6.4 累加雨量計算
@@ -551,6 +570,16 @@ uv run python -m uc_rainfall.cli ingest \
   --db-path outputs/uc_rainfall.sqlite3
 ```
 
+複数入力例:
+
+```bash
+uv run python -m uc_rainfall.cli ingest \
+  --input-path data/uc_data_zip/rain_download_121261948.zip \
+  --input-path data/uc_data_zip/rain_download_126675021.zip \
+  --input-path data/uc_data_zip/rain_download_191300475.zip \
+  --db-path outputs/uc_data_zip_trim.sqlite3
+```
+
 
 ### 7.2 候補一覧コマンド
 
@@ -591,6 +620,7 @@ uv run python -m uc_rainfall.cli plot \
 備考:
 
 - `plot` は指定 `dataset_id` だけでなく、同一格子定義を持つ他の `dataset_id` も内部的に束ねて利用する
+- `dataset_id` を省略した場合は、位置一致する全データセットを内部的に束ねて利用する
 
 流域集計例:
 

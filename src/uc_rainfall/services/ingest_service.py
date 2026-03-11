@@ -9,7 +9,7 @@ import pandas as pd
 from ..db import initialize_schema, open_db, replace_cell_timeseries, replace_polygon_cell_map, upsert_dataset, upsert_grid, upsert_polygons
 from ..ingest import build_grid_definition, iter_cell_rows, load_uc_input_bundle, parse_rain_dat, resolve_observation_times
 from ..models import DatasetRecord, GridDefinition
-from ..spatial import build_polygon_cell_map, load_polygons
+from ..spatial import build_polygon_cell_map, load_polygons, load_polygons_from_db
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +38,23 @@ def _build_timeseries_frame(
         rows,
         columns=["observed_at", "row", "col", "x_center", "y_center", "rainfall_mm", "quality"],
     )
+
+
+def _filter_timeseries_to_polygon_cells(
+    frame: pd.DataFrame,
+    *,
+    polygon_cell_rows: list[tuple[str, int, int, int, int, int, str]],
+) -> pd.DataFrame:
+    """流域内セルに該当する時系列だけを残す。"""
+    if frame.empty:
+        return frame
+    allowed = pd.DataFrame(
+        [(row, col) for _, row, col, *_ in polygon_cell_rows],
+        columns=["row", "col"],
+    ).drop_duplicates()
+    if allowed.empty:
+        return frame.iloc[0:0].copy()
+    return frame.merge(allowed, on=["row", "col"], how="inner")
 
 
 def _same_nan_aware(left: pd.Series, right: pd.Series) -> pd.Series:
@@ -138,7 +155,7 @@ def ingest_uc_rainfall(
     *,
     db_path: str | Path,
     input_path: str | Path,
-    polygon_dir: str | Path,
+    polygon_dir: str | Path | None,
     dataset_id: str | None = None,
     grid_crs: str = "EPSG:4326",
 ) -> None:
@@ -154,21 +171,31 @@ def ingest_uc_rainfall(
             bundle.raster_paths,
             grid_crs=grid_crs,
         )
-        polygon_records, polygon_frames = load_polygons(polygon_dir)
-        new_frame = _build_timeseries_frame(observed_times, matrices, grid)
-
-        dataset = DatasetRecord(
-            dataset_id=bundle.dataset_id,
-            source_type="uc_tools",
-            source_dir=str(bundle.source_path),
-            time_start=min(observed_times) if observed_times else None,
-            time_end=max(observed_times) if observed_times else None,
-            crs_raw=grid.grid_crs,
-            created_at=datetime.now(),
-        )
 
         with open_db(db_path) as conn:
             initialize_schema(conn)
+            if polygon_dir is not None:
+                polygon_records, polygon_frames = load_polygons(polygon_dir)
+                upsert_polygons(conn, polygon_records)
+                LOGGER.info("ポリゴンはファイルから読み込みます: %s", polygon_dir)
+            else:
+                polygon_records, polygon_frames = load_polygons_from_db(conn)
+                LOGGER.info("ポリゴンは DB 登録済み geometry を利用します。")
+
+            polygon_cell_rows = list(build_polygon_cell_map(grid, polygon_records, polygon_frames))
+            new_frame = _build_timeseries_frame(observed_times, matrices, grid)
+            new_frame = _filter_timeseries_to_polygon_cells(new_frame, polygon_cell_rows=polygon_cell_rows)
+
+            dataset = DatasetRecord(
+                dataset_id=bundle.dataset_id,
+                source_type="uc_tools",
+                source_dir=str(bundle.source_path),
+                time_start=min(observed_times) if observed_times else None,
+                time_end=max(observed_times) if observed_times else None,
+                crs_raw=grid.grid_crs,
+                created_at=datetime.now(),
+            )
+
             duplicate_of = _check_duplicate_or_conflict(
                 conn,
                 dataset_id=bundle.dataset_id,
@@ -180,14 +207,38 @@ def ingest_uc_rainfall(
             upsert_dataset(conn, dataset)
             upsert_grid(conn, grid)
             replace_cell_timeseries(conn, bundle.dataset_id, new_frame.itertuples(index=False, name=None))
-            upsert_polygons(conn, polygon_records)
-            replace_polygon_cell_map(conn, bundle.dataset_id, build_polygon_cell_map(grid, polygon_records, polygon_frames))
+            replace_polygon_cell_map(conn, bundle.dataset_id, polygon_cell_rows)
 
         LOGGER.info(
-            "取り込み完了: dataset_id=%s source=%s 観測数=%s 格子=%sx%s",
+            "取り込み完了: dataset_id=%s source=%s 観測数=%s 格子=%sx%s 保存セル数=%s",
             bundle.dataset_id,
             bundle.source_path,
             len(observed_times),
             rows,
             cols,
+            len(new_frame),
         )
+
+
+def ingest_uc_rainfall_many(
+    *,
+    db_path: str | Path,
+    input_paths: list[str | Path],
+    polygon_dir: str | Path | None,
+    grid_crs: str = "EPSG:4326",
+) -> None:
+    """複数の UC-tools 入力を順番に取り込む。"""
+    if not input_paths:
+        raise ValueError("取り込み対象の入力パスが指定されていません。")
+
+    LOGGER.info("一括取り込みを開始します。対象件数=%s", len(input_paths))
+    for index, input_path in enumerate(input_paths, start=1):
+        LOGGER.info("一括取り込み %s/%s: %s", index, len(input_paths), input_path)
+        ingest_uc_rainfall(
+            db_path=db_path,
+            input_path=input_path,
+            polygon_dir=polygon_dir,
+            dataset_id=None,
+            grid_crs=grid_crs,
+        )
+    LOGGER.info("一括取り込みが完了しました。")
