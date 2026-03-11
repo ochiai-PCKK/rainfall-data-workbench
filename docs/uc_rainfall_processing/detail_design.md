@@ -14,7 +14,7 @@
 
 初期実装で実施するもの:
 
-- UC-tools ダウンロードディレクトリの解析
+- UC-tools ダウンロードディレクトリまたは ZIP ファイルの解析
 - `rain.dat` の読み取り
 - JST 時刻列の復元
 - 格子定義の抽出
@@ -23,7 +23,10 @@
 - SQLite への保存
 - CLI による候補セル一覧表示
 - `row/col` 指定によるセル選択
+- 流域内全セルの合計時系列生成
+- 流域内全セルの平均時系列生成
 - 表示期間指定
+- 同一格子定義を持つ複数 `dataset_id` の時系列結合
 - 指定期間内の各指標最大イベント抽出
 - PNG グラフ出力
 
@@ -101,6 +104,7 @@ CREATE TABLE datasets (
 
 - 時刻は JST の ISO8601 文字列で保存する
 - `dataset_id` は入力ディレクトリ名またはユーザー指定値を使用する
+- `source_dir` には元の入力位置を保存し、ZIP 指定時は ZIP ファイルパスを記録する
 
 
 ### 4.2 grids
@@ -233,7 +237,7 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 入力:
 
-- UC-tools ダウンロードディレクトリ
+- UC-tools ダウンロードディレクトリまたは ZIP ファイル
 - 流域ポリゴンディレクトリ
 
 期待ファイル:
@@ -241,6 +245,11 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - `rain.dat`
 - 関連ラスタファイル群
 - メール本文ファイル
+
+補足:
+
+- ZIP 入力時は一時ディレクトリへ展開して処理する
+- `mail_txt.txt` が存在しない場合は、TIFF の GeoTransform から格子定義を取得する
 
 
 ### 5.2 処理順
@@ -251,10 +260,11 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 4. `rain.dat` ブロック数と時刻列の整合確認
 5. 格子定義抽出
 6. `cell_timeseries` レコード生成
-7. 流域ポリゴン読込
-8. ポリゴン BBox 保存
-9. 候補セル抽出
-10. `polygon_cell_map` 保存
+7. 同一格子既存データとの重複チェック
+8. 流域ポリゴン読込
+9. ポリゴン BBox 保存
+10. 候補セル抽出
+11. `polygon_cell_map` 保存
 
 
 ### 5.3 時刻復元詳細
@@ -322,6 +332,39 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - `selection_method='center_in_polygon'`
 
 
+### 5.7 重複登録判定
+
+対象:
+
+- 同一格子定義を持つ既存 `dataset_id`
+
+判定ルール:
+
+1. `grid_crs`, `origin_x`, `origin_y`, `cell_width`, `cell_height`, `rows`, `cols` が一致する既存データセットを探す
+2. 完全一致なら登録をスキップする
+3. 重複時刻があり、対応セル値がすべて一致する場合は登録を許可する
+4. 重複時刻があり、対応セル値に不一致がある場合はエラーとする
+
+備考:
+
+- 部分的に期間が重なっていて、重複時刻の値がすべて一致する場合は登録を許可する
+- この場合、可視化時には同一格子系列として後段で結合される
+
+完全一致の例:
+
+- 同じ格子
+- 同じ `observed_at`
+- 同じ `row/col`
+- 同じ `rainfall_mm`
+
+不整合の例:
+
+- 同じ格子
+- 同じ `observed_at`
+- 同じ `row/col`
+- `rainfall_mm` が異なる
+
+
 ## 6. フェーズ2 詳細設計
 
 ### 6.1 入力
@@ -367,6 +410,18 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 - 地図上の可視化
 
 
+### 6.2a 系列モード
+
+初期実装では以下の系列モードを持つ。
+
+- `cell`
+- `polygon_sum`
+- `polygon_mean`
+
+`cell` の場合は `row`, `col` 指定を必須とする。
+`polygon_sum`, `polygon_mean` の場合は流域内候補セル全体を対象にする。
+
+
 ### 6.3 表示期間と内部計算期間
 
 ユーザー指定:
@@ -381,6 +436,9 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 ここで `max_window` は最大累加時間幅に応じて決まる。
 初期実装では 48時間を最大とする。
+
+同一格子定義を持つ複数 `dataset_id` が存在する場合は、可視化時にそれらを結合対象とする。
+格子一致判定は `grid_crs`, `origin_x`, `origin_y`, `cell_width`, `cell_height`, `rows`, `cols` の一致で行う。
 
 
 ### 6.4 累加雨量計算
@@ -403,6 +461,11 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 
 - 期間先頭で必要時間幅を満たさない場合は `NaN`
 - 欠測を 0 に置換しない
+
+重複時刻:
+
+- 同一 `observed_at` が複数 `dataset_id` に存在する場合は、起点 `dataset_id` を優先する
+- 採用されなかった他 `dataset_id` はログ出力する
 
 
 ### 6.5 最大イベント抽出
@@ -445,6 +508,7 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 出力単位:
 
 - `1セル × 1指標 = 1画像`
+- `1流域 × 1集計方法 × 1指標 = 1画像`
 
 最大出力枚数:
 
@@ -462,6 +526,12 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 rain126675021_東除川流域_r12_c34_24h_20250101T030000JST.png
 ```
 
+流域集計例:
+
+```text
+rain121261948_東除川流域_西除川流域_全セル合計_24h_20250101T230000JST.png
+```
+
 
 ## 7. CLI 詳細設計
 
@@ -476,8 +546,8 @@ rain126675021_東除川流域_r12_c34_24h_20250101T030000JST.png
 ```bash
 uv run python -m uc_rainfall.cli ingest \
   --dataset-id rain126675021 \
-  --input-dir data/rain_download_126675021 \
-  --polygon-dir data/大阪狭山市_流域界再投影 \
+  --input-path data/rain_download_121261948.zip \
+  --polygon-dir data/大阪狭山市_流域界 \
   --db-path outputs/uc_rainfall.sqlite3
 ```
 
@@ -513,6 +583,23 @@ uv run python -m uc_rainfall.cli plot \
   --polygon-name 東除川流域 \
   --row 12 \
   --col 34 \
+  --view-start 2025-01-01T00:00:00 \
+  --view-end 2025-01-03T23:00:00 \
+  --out-dir outputs/charts
+```
+
+備考:
+
+- `plot` は指定 `dataset_id` だけでなく、同一格子定義を持つ他の `dataset_id` も内部的に束ねて利用する
+
+流域集計例:
+
+```bash
+uv run python -m uc_rainfall.cli plot \
+  --db-path outputs/uc_rainfall.sqlite3 \
+  --dataset-id rain121261948 \
+  --polygon-name "東除川流域 + 西除川流域" \
+  --series-mode polygon_sum \
   --view-start 2025-01-01T00:00:00 \
   --view-end 2025-01-03T23:00:00 \
   --out-dir outputs/charts

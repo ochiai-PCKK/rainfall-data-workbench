@@ -13,12 +13,13 @@ resolution-markers = [
 [[package]]
 name = "28-jaxa-data"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "geopandas" },
     { name = "jaxa-earth" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "pandas" },
     { name = "rasterio" },
     { name = "requests" },
 ]
@@ -29,6 +30,7 @@ requires-dist = [
     { name = "jaxa-earth", url = "https://data.earth.jaxa.jp/api/python/v0.1.4/en/_downloads/c1dbe3f6901b028a5ee3a4f25519a590/jaxa-earth-0.1.4.zip" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.3" },
+    { name = "pandas", specifier = ">=2.3.3" },
     { name = "rasterio", specifier = ">=1.5.0" },
     { name = "requests", specifier = ">=2.32.5" },
 ]
