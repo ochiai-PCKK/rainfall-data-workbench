@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_plot.add_argument("--view-start", default=cached.get("view_start"))
     p_plot.add_argument("--view-end", default=cached.get("view_end"))
     p_plot.add_argument("--out-dir", default=cached.get("out_dir"))
+
+    p_gui = subparsers.add_parser("gui", help="Tkinter GUI を起動する")
+    p_gui.add_argument("--test-mode", action="store_true", help="AI テストモードで起動する")
     return parser
 
 
@@ -179,6 +182,12 @@ def main() -> None:
         )
         for path in paths:
             print(path)
+        return
+
+    if args.command == "gui":
+        from .gui import run_gui
+
+        run_gui(test_mode=bool(args.test_mode))
         return
 
     parser.error(f"不明なコマンドです: {args.command}")

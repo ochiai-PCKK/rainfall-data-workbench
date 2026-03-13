@@ -1,0 +1,97 @@
+function check_data() {
+
+    // テキストボックスのオブジェクトを取得
+    let a = document.getElementsByName("south")[0];
+    let b = document.getElementsByName("nouth")[0];
+    let c = document.getElementsByName("west")[0];
+    let d = document.getElementsByName("east")[0];
+    let e = document.getElementById("start_day");
+    let f = document.getElementById("finish_day");
+
+    // 上記オブジェクトからデータ（緯度経度&日付）を取得
+    let south = a.value;
+    let nouth = b.value;
+    let west = c.value;
+    let east = d.value;
+    let start_day = e.value;
+    let finish_day = f.value;
+
+    // 座標が範囲内に収まっていなければ処理を止める
+    if (south <= 20.0 || nouth >= 48.0 || west <= 118.0 || east >= 150.0) {
+        alert("座標範囲がオーバーしています。");
+        return false;
+    }
+
+    // 日付が"yyyy-mm-dd"の形式か確認
+    let sday_format = start_day.match(/^\d{4}-\d{2}-\d{2} 00:00$/);
+    let fday_format = finish_day.match(/^\d{4}-\d{2}-\d{2} 23:00$/);
+
+    // 形式が間違っている場合、処理を止める
+    if (sday_format == null) {
+        alert("開始日はyyyy-mm-dd 00:00の形式で記述してください。")
+        return false;
+    }
+    if (fday_format == null) {
+        alert("終了日はyyyy-mm-dd 23:00の形式で記述してください。")
+        return false;
+    }
+
+    // 開始日&終了日それぞれの年月日を取得
+    let s_year = start_day.slice(0, 4);
+    let s_month_str = start_day.slice(5, 7);
+    let s_month_convert = parseInt(s_month_str) - 1; //月は+1されてしまうので補正
+    let s_month = String(s_month_convert); //文字列型に戻す
+    let s_day = start_day.slice(8, 10);
+    let f_year = finish_day.slice(0, 4);
+    let f_month_str = finish_day.slice(5, 7);
+    let f_month_convert = parseInt(f_month_str) - 1; //月は+1されてしまうので補正
+    let f_month = String(f_month_convert); //文字列型に戻す
+    let f_day = finish_day.slice(8, 10);
+
+    // データ測定開始日、指定開始日、指定終了日、本日をDate型に変換
+    let dataday = new Date("2010", "00", "02");
+    let s_date = new Date(s_year, s_month, s_day);
+    let f_date = new Date(f_year, f_month, f_day);
+    let today = new Date();
+
+    // 確認用の変数
+    let ck_smonth = s_date.getMonth();
+    let ck_fmonth = f_date.getMonth();
+
+    // 指定日が有効な日付か確認、無効であれば処理を止める
+    if (s_month_convert != ck_smonth) {
+        alert("開始日が無効な値です。");
+        return false;
+    }
+    if (f_month_convert != ck_fmonth) {
+        alert("終了日が無効な値です。");
+        return false;
+    }
+
+    // 指定開始日が測定開始日よりも昔の場合、処理を止める
+    if (dataday.getTime() > s_date.getTime()) {
+        alert("取得可能な降雨データは2010年1月2日以降のものです。");
+        return false;
+    }
+
+    // 終了日が開始日よりも昔の場合、処理を止める
+    if (s_date.getTime() > f_date.getTime()) {
+        alert("開始日は終了日よりも過去にしてください。");
+        return false;
+    }
+
+    // 終了日が未来になっている場合、処理を止める
+    if (f_date.getTime() > today.getTime()) {
+        alert("終了日は本日よりも過去にしてください。");
+        return false;
+    }
+
+    // 開始日～終了日が3日以上ある場合、処理を止める
+    // （一度にDLできるのは3日までに制限する）
+    if (f_date.getTime() - s_date.getTime() >= 259200000) {
+        alert("一度に取得できるデータは3日までです。")
+        return false;
+    }
+
+    return true;
+}

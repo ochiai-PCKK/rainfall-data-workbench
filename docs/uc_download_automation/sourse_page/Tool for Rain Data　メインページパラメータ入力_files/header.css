@@ -1,0 +1,41 @@
+@import url(http://fonts.googleapis.com/earlyaccess/notosansjp.css);
+
+body {
+	margin-top: 8px;
+}
+
+.rain_header {
+	display: flex;
+	justify-content: space-between;
+	align-items:center;
+	border-bottom: solid 3px #929292;
+	padding-left: 0px;
+	height: 7.870967742vh;
+}
+
+.rain_header_logo {
+	display: flex;
+	padding-left: 0px;
+}
+.rain_header_logo img {
+	width: 4vw;
+}
+.rain_header_logo span {
+	margin-left: 10px;
+	font-size: 2.2806451613vw;
+	color: #929292;
+	font-weight: 400;
+}
+.logo_link {
+	display: flex;
+	align-items:center;
+	text-decoration: none;
+}
+
+.extract_rink {
+	display: flex;
+	flex-flow: column;
+}
+.extract_rink a {
+	margin-right: 20px;
+}

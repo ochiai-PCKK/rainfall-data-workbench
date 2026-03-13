@@ -1,0 +1,19 @@
+@import url(http://fonts.googleapis.com/earlyaccess/notosansjp.css);
+
+.rain_footer_inner {
+	display: table;
+	width: 100vw;
+	margin-left: calc(-50vw + 50%);
+	height: 50px;
+	background-color: rgba(146,146,146,1);
+	text-align: center;
+	font-family: 'Noto Sans JP', sans-serif;
+	font-weight:300;
+	color: rgba(255,255,255,1);
+	position: absolute;/*←絶対位置*/
+    bottom: 0; /*下に固定*/
+}
+rain_footer_inner p {
+	display: table-cell;
+	vertical-align: middle;
+}

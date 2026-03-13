@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<!-- saved from url=(0042)https://ucrain.i-ric.info/map/1676653/218/ -->
+<html lang="ja"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <title>Tool for Rain Data　メインページ</title>
+
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　メインページ_files/get_rain.css">
+    <script type="text/javascript" src="./Tool for Rain Data　メインページ_files/get_rain.js.ダウンロード"></script>
+
+    <!-- header & footer -->
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　メインページ_files/header.css">
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　メインページ_files/footer.css">
+
+    <!-- jQuery -->
+    <script src="./Tool for Rain Data　メインページ_files/jquery.min.js.ダウンロード"></script>
+
+    <!-- Datepicker -->
+    <link rel="stylesheet" href="./Tool for Rain Data　メインページ_files/jquery-ui.min.css">
+    <script src="./Tool for Rain Data　メインページ_files/jquery-ui.min.js.ダウンロード"></script>
+
+    <!-- leaflet -->
+    <link rel="stylesheet" href="./Tool for Rain Data　メインページ_files/leaflet.css">
+    <script src="./Tool for Rain Data　メインページ_files/leaflet.js.ダウンロード"></script>
+
+    <!-- leaflet-areaselect -->
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　メインページ_files/leaflet-areaselect.css">
+    <script type="text/javascript" src="./Tool for Rain Data　メインページ_files/leaflet-areaselect.js.ダウンロード"></script>
+</head>
+<body>
+    <header class="rain_header">
+        <div class="rain_header_logo">
+            <a href="https://ucrain.i-ric.info/map/1676653/218/" class="logo_link">
+                <img src="./Tool for Rain Data　メインページ_files/rain_logo.svg">
+                <span>降雨データ</span>
+            </a>
+        </div>
+        <div class="extract_rink">
+            <a href="https://tools.i-ric.info/tool_menu/1676653/">UC Tools</a>
+            <a href="https://basin.i-ric.info/basin_map/1676653/218/">流域データ</a>
+        </div>
+    </header>
+    <section>
+        <div id="leaflet_main">
+            <div id="result">
+                <div class="title">
+                    <p>STEP 1：</p>
+                </div>
+                <div class="form_text">
+                    <p>地図上でエリアを指定して下さい。</p>
+                </div>
+                <form action="https://ucrain.i-ric.info/map/1676653/218/" target="_blank" method="POST" onsubmit="return check_data()">
+                    <div id="Coordinate">
+                                <dl>
+                                    <dt>緯度</dt><dd><input type="text" name="south" class="lat_s" size="11" readonly="">
+                                        -
+                                        <input type="text" name="nouth" class="lat_n" size="11" readonly=""></dd>
+                                </dl>
+                                <dl>
+                                    <dt>経度</dt><dd><input type="text" name="west" class="lng_w" size="11" readonly="">
+                                        -
+                                        <input type="text" name="east" class="lng_e" size="11" readonly=""></dd>
+                                </dl>
+                    </div>
+                    <div class="text_position">
+                        <ul class="coord_text">
+                            <li> DL可能な範囲は以下の通りです</li>
+                            <li>北緯 20度～ 48度　東経 118度～ 150度</li>
+                        </ul>
+                    </div>
+                    <div id="Date">
+                        <div class="title">
+                            <p>STEP 2：</p>
+                        </div>
+                        <div class="form_text">
+                            <p>取得したい期間を日単位で指定して下さい。</p>
+                        </div>
+                            <div id="day">
+                                <dl>
+                                    <dt>期間</dt><dd><input type="text" id="start_day" name="start_day" size="11" class="hasDatepicker">
+                                    から
+                                    <!-- <input type="text" id="finish_day" name="finish_day" size="11"> -->
+                                    <select name="days">
+                                        <option value="1">1日間</option>
+                                        <option value="2">2日間</option>
+                                        <option value="3">3日間</option>
+                                    </select></dd>
+                                </dl>
+                            </div>
+                    </div>
+                    <div class="coord_text">
+                        <ul>
+                            <li>日時はJST（日本標準時）です</li>
+                            <li>DL可能な期間は2010年1月2日以降です</li>
+                            <li>一度に取得できるのは3日までです</li>
+                        </ul>
+                    </div>
+                    <div class="title">
+                        <p>STEP 3：</p>
+                    </div>
+                    <div class="form_text">
+                        <p>確認画面を押して下さい。</p>
+                    </div>
+                    <div class="button">
+                        <input type="submit" value="確認画面" alt="確認画面">
+                    </div>
+                    <div class="coord_text">
+                        <ul>
+                            <li>取得されるデータは以下のものです。</li>
+                            <li><a href="http://www.jmbsc.or.jp/jp/offline/cd0100.html" target="_blank" rel="noopener noreferrer">解析雨量（気象業務支援センター）</a></li>
+                        </ul>
+                    </div>
+                </form>
+            </div>
+            <div id="mapcontainer" class="leaflet-container leaflet-touch leaflet-fade-anim leaflet-grab leaflet-touch-drag leaflet-touch-zoom" tabindex="0" style="position: relative;"><div class="leaflet-pane leaflet-map-pane" style="transform: translate3d(-357px, 0px, 0px);"><div class="leaflet-pane leaflet-tile-pane"><div class="leaflet-layer " style="z-index: 1; opacity: 1;"><div class="leaflet-tile-container leaflet-zoom-animated" style="z-index: 18; transform: translate3d(0px, 0px, 0px) scale(1);"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(829px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(829px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(1).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(573px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(2).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1085px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(1).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(573px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(2).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1085px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(829px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(829px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(1).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(573px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(2).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1085px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(1).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(573px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(2).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1085px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(3).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(317px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(4).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1341px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(3).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(317px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(4).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1341px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(3).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(317px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(4).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1341px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(3).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(317px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(4).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1341px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(5).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(61px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(6).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1597px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(5).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(61px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(6).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1597px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(5).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(61px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(6).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1597px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(5).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(61px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(6).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1597px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(7).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-195px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/46(8).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1853px, 162px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(7).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-195px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/47(8).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1853px, 418px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(7).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-195px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/45(8).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1853px, -94px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(7).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-195px, 674px, 0px); opacity: 1;"><img alt="" role="presentation" src="./Tool for Rain Data　メインページ_files/48(8).png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1853px, 674px, 0px); opacity: 1;"></div></div></div><div class="leaflet-pane leaflet-shadow-pane"></div><div class="leaflet-pane leaflet-overlay-pane"></div><div class="leaflet-pane leaflet-marker-pane"></div><div class="leaflet-pane leaflet-tooltip-pane"></div><div class="leaflet-pane leaflet-popup-pane"></div><div class="leaflet-proxy leaflet-zoom-animated" style="transform: translate3d(29364px, 11993px, 0px) scale(64);"></div></div><div class="leaflet-control-container"><div class="leaflet-top leaflet-left"></div><div class="leaflet-top leaflet-right"></div><div class="leaflet-bottom leaflet-left"><div class="leaflet-control-zoom leaflet-bar leaflet-control"><a class="leaflet-control-zoom-in" href="https://ucrain.i-ric.info/map/1676653/218/#" title="Zoom in" role="button" aria-label="Zoom in">+</a><a class="leaflet-control-zoom-out" href="https://ucrain.i-ric.info/map/1676653/218/#" title="Zoom out" role="button" aria-label="Zoom out">−</a></div></div><div class="leaflet-bottom leaflet-right"><div class="leaflet-control-scale leaflet-control"><div class="leaflet-control-scale-line" style="width: 113px;">100 km</div></div><div class="leaflet-control-attribution leaflet-control"><a href="https://leafletjs.com/" title="A JS library for interactive maps">Leaflet</a> | <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">地理院タイル</a></div></div><div class="leaflet-areaselect-container"><div class="leaflet-areaselect-shade leaflet-control" style="width: 1304px; height: 254px; top: 0px; left: 0px;"></div><div class="leaflet-areaselect-shade leaflet-control" style="width: 1304px; height: 254px; left: 0px; bottom: 0px;"></div><div class="leaflet-areaselect-shade leaflet-control" style="width: 552px; height: 250px; top: 254px; left: 0px;"></div><div class="leaflet-areaselect-shade leaflet-control" style="width: 552px; height: 250px; top: 254px; right: 0px;"></div><div class="leaflet-areaselect-handle leaflet-control" style="top: 247px; left: 544px;"></div><div class="leaflet-areaselect-handle leaflet-control" style="left: 544px; bottom: 247px;"></div><div class="leaflet-areaselect-handle leaflet-control" style="top: 247px; right: 544px;"></div><div class="leaflet-areaselect-handle leaflet-control" style="bottom: 247px; right: 544px;"></div></div></div></div>
+        </div>
+    </section>
+    <footer class="rain_footer">
+        <div class="rain_footer_inner">
+            <p>Copyright(C) 2021 iRIC-UC  All Rights Reserved.</p>
+        </div>
+    </footer>
+    <script>
+        //地図を表示するdiv要素のidを設定 & ズームコントロールを非表示
+        var map = L.map('mapcontainer', { zoomControl: false });
+    
+        //地図の中心とズームレベルを指定
+        map.setView([43.38, 142.6], 7);
+    
+        //表示するタイルレイヤのURLとAttributionコントロールの記述を設定
+        var tileLayer = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+            attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html' target='_blank'>地理院タイル</a>"
+        });
+    
+        // 設定したタイルレイヤをmapに追加
+        tileLayer.addTo(map);
+    
+        //スケールコントロールを最大幅200px、右下、m単位で地図に追加
+        L.control.scale({ maxWidth: 200, position: 'bottomright', imperial: false }).addTo(map);
+    
+        //ズームコントロールを左下で地図に追加
+        L.control.zoom({ position: 'bottomleft' }).addTo(map);
+    
+        //areaセレクター設定
+        var areaSelect = L.areaSelect({width:200, height:250});
+    
+        // //セレクターチェンジイベント
+        areaSelect.on("change", function() {
+            var bounds = this.getBounds();
+            $("#result .lat_s").val(bounds.getSouthWest().lat);
+            $("#result .lng_w").val(bounds.getSouthWest().lng);
+            $("#result .lat_n").val(bounds.getNorthEast().lat);
+            $("#result .lng_e").val(bounds.getNorthEast().lng);
+        });
+
+        // areaセレクターをmapに追加
+        areaSelect.addTo(map);
+    </script>
+    <script>
+        $( function() {
+            $( "#start_day" ).datepicker({
+                dateFormat:"yy-mm-dd"
+            });
+        } );
+    </script>
+    <!-- <script>
+        $( function() {
+            $( "#finish_day" ).datepicker({
+                dateFormat:"yy-mm-dd 23:00"
+            });
+        } );
+    </script> -->
+
+<div id="ui-datepicker-div" class="ui-datepicker ui-widget ui-widget-content ui-helper-clearfix ui-corner-all"></div></body></html>

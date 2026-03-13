@@ -1,0 +1,56 @@
+@import url(http://fonts.googleapis.com/earlyaccess/notosansjp.css);
+
+html {
+	height: 100%;
+}
+body {
+	min-height: 100%;
+	display: flex;
+	flex-direction: column;
+	position: relative;/*←相対位置*/
+    margin-top: 0px;
+	padding-bottom: 0px;/*←footerの高さ*/
+}
+
+section {
+    width: 260px;
+    margin: 70px auto;
+}
+
+#btn_1,#btn_2 {
+    margin-bottom: 30px;
+    }
+
+#btn_1 img {
+    width: 70px;
+    padding-top: 5px;
+}
+#btn_2 img {
+    width: 57.5px;
+    padding-top: 5px;
+}
+.btn_rain,.btn_extract {
+    padding-left: 50px;
+    display: flex;
+    align-items: center;
+    width: 260px;
+    background: #ffffff;
+    padding-bottom: 5px;
+    border: solid 2px  #929292;
+    border-radius: 0.5rem;
+    text-decoration: none;
+    font-size: 1.5em;  
+    color: #929292;
+}
+
+.btn_rain:hover,.btn_extract:hover {
+    background: #d4d4d4;
+    color: #ffffff;
+}
+.btn_rain span {
+    margin-left: 10px;
+ 
+}
+.btn_extract span {
+    margin-left: 25px;
+}

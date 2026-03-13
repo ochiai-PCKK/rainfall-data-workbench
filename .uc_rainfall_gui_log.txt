@@ -1,0 +1,14 @@
+2026-03-12 16:20:05 [INFO] 面ビューの dataset_id は時刻一致候補から先頭を採用します: selected=rain121261948 candidates=['rain121261948', 'rain126675021']
+2026-03-12 16:20:08 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:20 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:32 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:37 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:42 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:47 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:20:52 [INFO] 面ビューを描画しました: polygon=大和川流域界 metric=12h dataset=rain121261948
+2026-03-12 16:21:55 [INFO] 一括取り込みを開始します。対象件数=3
+2026-03-12 16:21:55 [INFO] 一括取り込み 1/3: C:/Users/yuuta.ochiai/Downloads/rain_download_175996101.zip
+2026-03-12 16:21:56 [INFO] ポリゴンは DB 登録済み geometry を利用します。
+2026-03-12 16:21:57 [INFO] 取り込み完了: dataset_id=rain_download_175996101 source=C:\Users\yuuta.ochiai\Downloads\rain_download_175996101.zip 観測数=72 格子=46x36 保存セル数=50760
+2026-03-12 16:21:57 [INFO] 一括取り込み 2/3: C:/Users/yuuta.ochiai/Downloads/RainfallCollector-v0.6.0.zip
+2026-03-12 16:22:15 [ERROR] 取り込みに失敗しました。 詳細: ZIP 内の rain.dat は 1 件である必要があります。検出件数=0: C:\Users\yuuta.ochiai\Downloads\RainfallCollector-v0.6.0.zip

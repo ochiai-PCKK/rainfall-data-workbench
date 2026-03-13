@@ -1,0 +1,156 @@
+@import url(http://fonts.googleapis.com/earlyaccess/notosansjp.css);
+
+html {
+	height: 100%;
+}
+body {
+	min-height: 100%;
+	display: flex;
+	flex-direction: column;
+	position: relative;/*←相対位置*/
+	padding-bottom: -50px;/*←footerの高さ*/
+}
+
+/* 検索部分 */
+section {
+	flex: 1;
+}
+#leaflet_main {
+	margin: 10px 0;
+	display: flex;
+	justify-content: center;
+	height: 40vh;
+}
+
+/* STEP1 */
+#Coordinate {
+	font-size: 16px;
+	font-weight: 400;
+	display: inline-block;
+}
+#Coordinate dt {
+	width: 35px;
+}
+#Coordinate dl {
+	display: flex;
+	align-items: center;
+	margin: 0;
+}
+#Coordinate dd {
+	margin-left: 10px;
+	margin-top: 5px;
+}
+
+/* STEP2 */
+#day {
+	font-size: 16px;
+	font-weight: 400;
+	display: inline-block;
+}
+#day dt {
+	width: 35px;
+}
+#day dl {
+	display: flex;
+	align-items: center;
+	margin: 0;
+}
+#day dd {
+	margin-left: 10px;
+}
+#result {
+	text-align: left;
+	font-family: Noto Sans JP;
+	font-weight: bold;
+	font-size: 20px;
+	color: rgba(105,103,103,1);
+	margin-left: 0px;
+}
+.title p {
+	margin: 0;
+	font-size: 17px;
+	width: 80px;
+	background-image:linear-gradient(transparent 30%, #a9c3c9 60%);
+}
+.coord_text {
+	padding-left: 20px;
+	margin: 5px 0;
+}
+.coord_text  li {
+	margin-top: 5px;
+	font-family: Noto Sans JP;
+	font-size: 14px;
+	font-weight: 400;
+	color: rgba(105,103,103,1);
+}
+
+
+/* STEP3 */
+.form_text p {
+	margin: 0px 10px 20px 0;
+	font-size: 14px;
+	font-weight: 400;
+	padding-left: 10px;
+}
+
+.lat_s,.lat_n,.lng_w,.lng_e {
+	height: 20px;
+}
+
+.text_position {
+	text-align: left;
+	margin-bottom: 50px;
+}
+
+
+
+#start_day {
+	height: 20px;
+}
+#finish_day {
+	height: 20px;
+}
+.coord_text ul {
+	margin: 5px 0;
+	padding-left: 0px;
+	margin-bottom: 50px;
+}
+
+.button {
+	text-align: center;
+}
+
+.button input[type = "submit"]{
+	text-align: center;
+	width: 12.2580645161vw;
+	font-weight: 400;
+	font-size: 1.32580645161vw;
+	color: #929292;
+	background-color: #efefef;
+	border-radius: 4px;
+}
+
+.button input[type = "submit"]:hover{
+	background-color: #929292;
+	color: #FFFFFF;
+	cursor: pointer;
+	border-radius: 4px;
+}
+
+.ui-datepicker,.ui-widget,.ui-widget-content,.ui-helper-clearfix,.ui-corner-allui-datepicker-div{
+	z-index: 1000 !important;
+}
+
+#mapcontainer {
+	width: 80vw;
+	height: 80vh;
+	/* width:1600px; */
+	/* height:680px */
+}
+#result {
+	width: 20vw;
+	height: 85vh;
+	overflow-y: scroll;
+	scrollbar-color: rebeccapurple green;
+	scrollbar-width: thin;
+}

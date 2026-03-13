@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<!-- saved from url=(0042)https://ucrain.i-ric.info/map/1676653/218/ -->
+<html lang="ja"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <title>Tool for Rain Data　確認画面</title>
+
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　確認画面_files/start_convert.css">
+    <!-- <script type=text/javascript src="/static/start_convert.js"></script> -->
+
+    <!-- header & footer -->
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　確認画面_files/header.css">
+    <link rel="stylesheet" type="text/css" href="./Tool for Rain Data　確認画面_files/footer.css">
+</head>
+<body>
+    <header class="rain_header">
+        <div class="rain_header_logo">
+            <a href="https://ucrain.i-ric.info/map/1676653/218/" class="logo_link">
+                <img src="./Tool for Rain Data　確認画面_files/rain_logo.svg">
+                <span>降雨データ</span>
+            </a>
+        </div>
+        <!-- <div class="extract_rink">
+            <a href="#">流域データ</a>
+        </div> -->
+    </header>
+    <section>
+        <div id="main">
+            <div id="text1">
+                <p>以下の内容で降雨データの変換を開始します。</p>
+            </div>    
+            <form name="infomation" action="https://ucrain.i-ric.info/convert/159218430/" method="POST">
+                <input type="hidden" name="id" value="159218430">
+                <input type="hidden" name="email" value="yuuta.ochiai@tk.pacific.co.jp">
+                <table>
+                    <tbody><tr>
+                        <td>データ抽出期間</td>
+                        <td>：</td>
+                        <td><input type="text" name="s_day" size="16" value="2025-01-01" 00:00="" readonly=""></td>
+                        <td>～</td>
+                        <td><input type="text" name="f_day" size="16" value="2025-01-03" 23:00="" readonly=""></td>
+                    </tr>
+                    <tr>
+                        <td>緯度</td>
+                        <td>：</td>
+                        <td><input type="text" name="lat_s" size="16" value="34.800533724402136" readonly=""></td>
+                        <td>～</td>
+                        <td><input type="text" name="lat_n" size="16" value="35.362435638879695" readonly=""></td>
+                    </tr>
+                    <tr>
+                        <td>経度</td>
+                        <td>：</td>
+                        <td><input type="text" name="lng_w" size="16" value="136.1315989712868" readonly=""></td>
+                        <td>～</td>
+                        <td><input type="text" name="lng_e" size="16" value="136.6809153775368" readonly=""></td>
+                    </tr>
+                </tbody></table>
+                <div id="space1"></div>
+                <div class="text2">
+                    <p>問題なければ「変換開始」を押してください。</p>
+                </div>
+
+                <div id="ok_cancel_button">
+                    <button name="btn" class="btn_1">
+                        <input type="submit" value="変換開始" alt="変換開始"> 
+                    </button>
+                    <div class="btn_2">
+                        <input type="submit" onclick="window.open(&#39;&#39;,&#39;_self&#39;).close();" value="キャンセル" alt="キャンセル">
+                    </div>
+                </div>
+            </form>
+        </div>
+    </section>
+    <footer class="rain_footer">
+        <div class="rain_footer_inner">
+            <p>Copyright(C) 2021 iRIC-UC  All Rights Reserved.</p>
+        </div>
+    </footer>
+    <script type="text/javascript" src="./Tool for Rain Data　確認画面_files/start_convert.js.ダウンロード"></script>
+
+</body></html>
