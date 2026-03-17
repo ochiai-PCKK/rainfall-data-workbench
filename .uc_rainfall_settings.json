@@ -1,18 +1,15 @@
 {
-  "db_path": "C:\\Users\\yuuta.ochiai\\Documents\\28_jaxa_data\\outputs\\uc_data_zip_trim.sqlite3",
-  "polygon_name": "大和川流域界",
-  "input_paths": [
-    "C:/Users/yuuta.ochiai/Downloads/rain_download_175996101.zip",
-    "C:/Users/yuuta.ochiai/Downloads/RainfallCollector-v0.6.0.zip",
-    "C:/Users/yuuta.ochiai/Downloads/RainfallCollector-v0.5.0.zip"
-  ],
+  "db_path": "C:\\Users\\yuuta.ochiai\\Documents\\28_jaxa_data\\outputs\\uc_download\\download\\yamatogawa_20100102_20251231.sqlite3",
+  "polygon_name": "東除川流域",
+  "input_paths": [],
   "series_mode": "polygon_weighted_sum",
-  "view_start": "2025-01-01T00:00:00",
-  "view_end": "2025-01-03T23:00:00",
+  "view_start": "2010-01-02T00:00:00",
+  "view_end": "2010-04-13T23:00:00",
   "out_dir": "C:\\Users\\yuuta.ochiai\\Documents\\28_jaxa_data\\outputs\\gui_direct_test_plot_v2",
   "local_row": "3",
   "local_col": "23",
-  "spatial_timestamp": "2025-01-03T06:00:00",
+  "spatial_timestamp": "2010-04-13T00:00:00",
   "spatial_metric": "12h",
-  "preferred_dataset_id": "rain121261948"
+  "preferred_dataset_id": "rain121261948",
+  "polygon_dir": "data\\大阪狭山市_流域界"
 }

@@ -29,6 +29,8 @@ from .pages import ParameterPage
 from .period_planner import build_request_windows
 from .result_store import ResultStore
 from .workflows import execute_request_flow
+from .workflows import fetch_zips
+from .workflows import ingest_mail_bodies
 from .workflows import run_login_flow
 from .workflows import run_loop_flow
 
@@ -67,6 +69,62 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument("--period-start", default=DEFAULT_PERIOD_START.isoformat())
     p_loop.add_argument("--period-end", default=DEFAULT_PERIOD_END.isoformat())
     p_loop.add_argument("--chunk-days", type=int, choices=[1, 2, 3], default=DEFAULT_CHUNK_DAYS)
+    p_loop.add_argument(
+        "--retry-on-failure-count",
+        type=int,
+        default=1,
+        help="失敗した期間を再試行する回数。既定は 1 回",
+    )
+    p_loop.add_argument(
+        "--retry-wait-seconds",
+        type=float,
+        default=10.0,
+        help="再試行前に待機する秒数。既定は 10 秒",
+    )
+    p_loop.add_argument(
+        "--stop-on-failed-window",
+        action="store_true",
+        help="失敗期間をスキップせず、その場で停止する",
+    )
+
+    p_ingest = subparsers.add_parser(
+        "ingest-mail-bodies",
+        help="貼り付けたメール本文から URL と期間を抽出して保存する",
+    )
+    p_ingest.add_argument("--input-file", help="取り込むメール本文テキストのパス")
+    p_ingest.add_argument("--stdin", action="store_true", help="標準入力からメール本文を読む")
+    p_ingest.add_argument("--paste", action="store_true", help="対話的に本文を貼り付けて取り込む")
+    p_ingest.add_argument(
+        "--end-marker",
+        default="__END__",
+        help="--paste 時に入力終了を表す行。既定は __END__",
+    )
+    p_ingest.add_argument(
+        "--allow-warnings",
+        action="store_true",
+        help="gap や overlap などの warning があっても成功扱いで終了する",
+    )
+    p_ingest.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="取り込み結果の出力先")
+    p_ingest.add_argument("--expected-start", help="期待期間の開始日")
+    p_ingest.add_argument("--expected-end", help="期待期間の終了日")
+
+    p_fetch = subparsers.add_parser("fetch-zips", help="保存済み URL から ZIP を取得する")
+    p_fetch.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="入出力ディレクトリ")
+    p_fetch.add_argument("--downloads-dir", default=str(DEFAULT_DOWNLOADS_DIR), help="ZIP 保存先")
+    p_fetch.add_argument(
+        "--status",
+        choices=["pending", "failed", "expired", "all"],
+        default="pending",
+        help="取得対象の状態を絞り込む",
+    )
+    p_fetch.add_argument("--timeout-seconds", type=float, default=120.0, help="HTTP タイムアウト秒数")
+    p_fetch.add_argument("--limit", type=int, help="先頭から指定件数だけ処理する")
+
+    p_gui = subparsers.add_parser("launch-gui", help="メール本文取り込み用の簡易 GUI を開く")
+    p_gui.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="入出力ディレクトリ")
+    p_gui.add_argument("--downloads-dir", default=str(DEFAULT_DOWNLOADS_DIR), help="ZIP 保存先")
+    p_gui.add_argument("--expected-start", default=DEFAULT_PERIOD_START.isoformat(), help="期待期間の開始日")
+    p_gui.add_argument("--expected-end", default=DEFAULT_PERIOD_END.isoformat(), help="期待期間の終了日")
 
     return parser
 
@@ -144,6 +202,61 @@ def main() -> int:
         path = store.save_period_plan(windows)
         LOGGER.info("期間計画を保存しました。件数=%s path=%s", len(windows), path)
         print(path)
+        return 0
+
+    if args.command == "ingest-mail-bodies":
+        text = _read_ingest_input(args)
+        summary = ingest_mail_bodies(
+            text,
+            output_dir=Path(args.output_dir),
+            expected_start=_parse_date(args.expected_start) if args.expected_start else None,
+            expected_end=_parse_date(args.expected_end) if args.expected_end else None,
+        )
+        LOGGER.info(
+            "メール本文取り込みが完了しました。added=%s parse_failed=%s duplicates=%s warnings=%s",
+            summary["added_entry_count"],
+            summary["parse_failure_count"],
+            summary["duplicate_count"],
+            summary["warning_count"],
+        )
+        _log_ingest_warning_examples(summary)
+        print(summary["summary_path"])
+        if int(summary["parse_failure_count"]) > 0:
+            return 1
+        if int(summary["warning_count"]) > 0 and not args.allow_warnings:
+            LOGGER.warning("warning が検出されたため非ゼロ終了にします。必要なら --allow-warnings を指定してください。")
+            return 3
+        return 0
+
+    if args.command == "fetch-zips":
+        summary = fetch_zips(
+            output_dir=Path(args.output_dir),
+            downloads_dir=Path(args.downloads_dir),
+            status_filter=args.status,
+            timeout_seconds=args.timeout_seconds,
+            limit=args.limit,
+        )
+        LOGGER.info(
+            "ZIP 取得が完了しました。target=%s downloaded=%s failed=%s expired=%s already_exists=%s",
+            summary["target_entry_count"],
+            summary["downloaded_count"],
+            summary["failed_count"],
+            summary["expired_count"],
+            summary["already_exists_count"],
+        )
+        _log_zip_result_examples(summary)
+        print(summary["summary_path"])
+        return 0 if int(summary["failed_count"]) == 0 else 1
+
+    if args.command == "launch-gui":
+        from .gui import launch_gui
+
+        launch_gui(
+            output_dir=Path(args.output_dir),
+            downloads_dir=Path(args.downloads_dir),
+            expected_start=_parse_date(args.expected_start) if args.expected_start else None,
+            expected_end=_parse_date(args.expected_end) if args.expected_end else None,
+        )
         return 0
 
     bbox = resolve_bbox(
@@ -233,6 +346,9 @@ def main() -> int:
                     store=store,
                     expected_bbox=runtime_bbox,
                     bbox_to_apply=bbox_to_apply,
+                    retry_on_failure_count=max(0, int(args.retry_on_failure_count)),
+                    retry_wait_seconds=max(0.0, float(args.retry_wait_seconds)),
+                    skip_failed_window=not bool(args.stop_on_failed_window),
                 )
                 summary["command"] = args.command
                 summary["bbox_mode"] = config.bbox_mode
@@ -246,12 +362,24 @@ def main() -> int:
                 raise
 
         LOGGER.info(
-            "連続送信の実行が完了しました。processed=%s accepted=%s accepted_candidate=%s failed=%s",
+            "連続送信の実行が完了しました。processed=%s accepted=%s accepted_candidate=%s failed=%s retried=%s skipped=%s",
             summary["processed_windows"],
             summary["accepted_count"],
             summary["accepted_candidate_count"],
             summary["failed_count"],
+            summary.get("retried_window_count"),
+            summary.get("skipped_window_count"),
         )
+        if not bool(summary["completed_all"]) and isinstance(summary.get("next_window"), dict):
+            next_window = summary["next_window"]
+            next_start = next_window.get("start_date")
+            if next_start:
+                LOGGER.warning(
+                    "途中再開する場合は次を実行してください: "
+                    "uv run python -m uc_download.cli loop-request-links --period-start %s --period-end %s",
+                    next_start,
+                    args.period_end,
+                )
         print(store.run_summary_path)
         return 0 if bool(summary["completed_all"]) else 1
 
@@ -297,6 +425,91 @@ def _pause_browser_if_needed(page, message: str) -> None:
     except Exception:
         return
     input(message)
+
+
+def _read_ingest_input(args: argparse.Namespace) -> str:
+    """メール本文取り込み用の入力テキストを解決する。"""
+    input_modes = [bool(args.input_file), bool(args.stdin), bool(args.paste)]
+    if sum(input_modes) > 1:
+        raise RuntimeError("--input-file, --stdin, --paste は同時に指定できません。")
+    if args.input_file:
+        return Path(args.input_file).read_text(encoding="utf-8")
+    if args.paste:
+        return _read_paste_input(args.end_marker)
+    if args.stdin or not sys.stdin.isatty():
+        return _read_stdin_text()
+    raise RuntimeError("メール本文入力がありません。--input-file, --stdin, --paste のいずれかを指定してください。")
+
+
+def _read_stdin_text() -> str:
+    """標準入力から日本語を含む本文を安全に読む。"""
+    raw = sys.stdin.buffer.read()
+    encodings = [sys.stdin.encoding, "utf-8", "cp932"]
+    for encoding in encodings:
+        if not encoding:
+            continue
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _read_paste_input(end_marker: str) -> str:
+    """対話的な貼り付け入力を読む。"""
+    if not sys.stdin.isatty():
+        raise RuntimeError("--paste は対話端末でのみ利用できます。")
+
+    print(f"メール本文を貼り付けてください。終了するときは単独行で {end_marker} を入力します。")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line == end_marker:
+            break
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    if not text:
+        raise RuntimeError("貼り付け本文が空です。")
+    return text
+
+
+def _log_ingest_warning_examples(summary: dict[str, object]) -> None:
+    """メール取り込み warning をログへ出す。"""
+    examples = summary.get("warning_examples")
+    if not isinstance(examples, list) or not examples:
+        return
+    LOGGER.warning("期間整合性 warning を全件表示します。件数=%s", len(examples))
+    for item in examples:
+        if not isinstance(item, dict):
+            continue
+        LOGGER.warning(
+            "warning source_id=%s type=%s message=%s",
+            item.get("source_id"),
+            item.get("issue_type"),
+            item.get("message"),
+        )
+
+
+def _log_zip_result_examples(summary: dict[str, object]) -> None:
+    """ZIP 取得の失敗代表例をログへ出す。"""
+    examples = summary.get("result_examples")
+    if not isinstance(examples, list) or not examples:
+        return
+    LOGGER.warning("ZIP 取得で注意が必要な代表例を表示します。")
+    for item in examples[:3]:
+        if not isinstance(item, dict):
+            continue
+        LOGGER.warning(
+            "zip source_id=%s period=%s..%s status=%s message=%s",
+            item.get("source_id"),
+            item.get("period_start"),
+            item.get("period_end"),
+            item.get("status"),
+            item.get("message"),
+        )
 
 
 if __name__ == "__main__":

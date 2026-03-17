@@ -1,19 +1,18 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-import logging
-from typing import Any
+from typing import Any, cast
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import box
 from shapely import wkt as shapely_wkt
+from shapely.geometry import box
 
 from ..db import open_db
 from ..graph.metrics import METRIC_WINDOWS, add_metric_columns
 from .graph_service import _build_continuous_hourly_frame
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ def _load_dataset_grid(conn, *, dataset_id: str) -> pd.Series:
         WHERE dataset_id = ?
         """,
         conn,
-        params=(dataset_id,),
+        params=[dataset_id],
     )
     if frame.empty:
         raise ValueError(f"格子定義が見つかりません: dataset_id={dataset_id}")
@@ -53,7 +52,7 @@ def _resolve_spatial_dataset_id(
         ORDER BY d.dataset_id
         """,
         conn,
-        params=(polygon_name,),
+        params=[polygon_name],
     )
     if frame.empty:
         raise ValueError(f"流域 {polygon_name} に対応するデータセットが見つかりません")
@@ -63,7 +62,7 @@ def _resolve_spatial_dataset_id(
         end = row["time_end"]
         return (start is None or str(start) <= target_time) and (end is None or str(end) >= target_time)
 
-    candidates = frame[frame.apply(covers, axis=1)]
+    candidates = cast(pd.DataFrame, frame[frame.apply(covers, axis=1)])
     if dataset_id is not None:
         matched = candidates[candidates["dataset_id"] == dataset_id]
         if matched.empty:
@@ -112,8 +111,7 @@ def _load_polygon_cells_for_time(
           pcm.overlap_ratio,
           ct.x_center,
           ct.y_center,
-          ct.rainfall_mm,
-          ct.quality
+          ct.rainfall_mm
         FROM polygon_cell_map pcm
         JOIN polygons p ON p.polygon_id = pcm.polygon_id
         LEFT JOIN cell_timeseries ct
@@ -126,7 +124,7 @@ def _load_polygon_cells_for_time(
         ORDER BY pcm.polygon_local_row, pcm.polygon_local_col
         """,
         conn,
-        params=(target_time, dataset_id, polygon_name),
+        params=[target_time, dataset_id, polygon_name],
     )
 
 
@@ -151,7 +149,6 @@ def _load_polygon_cell_metric_values(
           ct.x_center,
           ct.y_center,
           ct.rainfall_mm,
-          ct.quality,
           pcm.polygon_local_row,
           pcm.polygon_local_col,
           pcm.overlap_ratio
@@ -166,12 +163,12 @@ def _load_polygon_cell_metric_values(
         ORDER BY ct.row, ct.col, ct.observed_at
         """,
         conn,
-        params=(
+        params=[
             dataset_id,
             polygon_name,
             calc_start.isoformat(timespec="seconds"),
             observed_at.isoformat(timespec="seconds"),
-        ),
+        ],
     )
     if frame.empty:
         return frame
@@ -277,17 +274,27 @@ def build_spatial_view_payload(
     cells["polygon_local_col"] = pd.to_numeric(cells["polygon_local_col"], errors="coerce")
     cells["overlap_ratio"] = pd.to_numeric(cells["overlap_ratio"], errors="coerce")
     cells["value"] = pd.to_numeric(cells["value"], errors="coerce")
-    raw_minx = cells["x_center"] - float(grid["cell_width"]) / 2.0
-    raw_maxx = cells["x_center"] + float(grid["cell_width"]) / 2.0
-    raw_miny = cells["y_center"] - float(grid["cell_height"]) / 2.0
-    raw_maxy = cells["y_center"] + float(grid["cell_height"]) / 2.0
+    x_centers = cast(pd.Series, cells["x_center"])
+    y_centers = cast(pd.Series, cells["y_center"])
+    grid_crs_value = cast(Any, grid["grid_crs"])
+    grid_crs = str(grid_crs_value) if pd.notna(grid_crs_value) and grid_crs_value not in ("", None) else None
+    cell_width = float(cast(Any, grid["cell_width"]))
+    cell_height = float(cast(Any, grid["cell_height"]))
+    raw_minx = x_centers - cell_width / 2.0
+    raw_maxx = x_centers + cell_width / 2.0
+    raw_miny = y_centers - cell_height / 2.0
+    raw_maxy = y_centers + cell_height / 2.0
 
     cell_geometries = gpd.GeoSeries(
         [box(minx, miny, maxx, maxy) for minx, miny, maxx, maxy in zip(raw_minx, raw_miny, raw_maxx, raw_maxy)],
-        crs=str(grid["grid_crs"]) if grid["grid_crs"] else None,
+        crs=grid_crs,
     )
-    center_points = gpd.GeoSeries.from_xy(cells["x_center"], cells["y_center"], crs=str(grid["grid_crs"]) if grid["grid_crs"] else None)
-    if str(grid["grid_crs"]) != str(polygon_crs):
+    center_points = gpd.GeoSeries.from_xy(
+        x_centers,
+        y_centers,
+        crs=grid_crs,
+    )
+    if grid_crs != str(polygon_crs):
         cell_geometries = cell_geometries.to_crs(polygon_crs)
         center_points = center_points.to_crs(polygon_crs)
 
@@ -299,13 +306,17 @@ def build_spatial_view_payload(
     cells["x_center_plot"] = center_points.x.to_numpy()
     cells["y_center_plot"] = center_points.y.to_numpy()
 
-    combined_bounds = cell_geometries.total_bounds
+    combined_bounds = cast(Any, cell_geometries.total_bounds)
+    combined_minx = float(combined_bounds[0])
+    combined_miny = float(combined_bounds[1])
+    combined_maxx = float(combined_bounds[2])
+    combined_maxy = float(combined_bounds[3])
     poly_bounds = polygon_geometry.bounds
     view_bounds = {
-        "minx": float(min(combined_bounds[0], poly_bounds[0])),
-        "miny": float(min(combined_bounds[1], poly_bounds[1])),
-        "maxx": float(max(combined_bounds[2], poly_bounds[2])),
-        "maxy": float(max(combined_bounds[3], poly_bounds[3])),
+        "minx": min(combined_minx, float(poly_bounds[0])),
+        "miny": min(combined_miny, float(poly_bounds[1])),
+        "maxx": max(combined_maxx, float(poly_bounds[2])),
+        "maxy": max(combined_maxy, float(poly_bounds[3])),
     }
 
     return {
@@ -317,8 +328,8 @@ def build_spatial_view_payload(
         "observed_at": observed_at,
         "metric": metric,
         "cells": cells.sort_values(["polygon_local_row", "polygon_local_col"]).reset_index(drop=True),
-        "cell_width": float(grid["cell_width"]),
-        "cell_height": float(grid["cell_height"]),
+        "cell_width": cell_width,
+        "cell_height": cell_height,
         "value_label": f"{metric} 雨量 (mm)",
         "view_bounds": view_bounds,
     }

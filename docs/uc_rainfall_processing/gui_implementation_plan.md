@@ -107,14 +107,26 @@ GUI 上では、英語の内部値を直接見せない。
   - 直近実行結果の JSON 出力
   - GUI ログの保存
 
-必要に応じて、後から以下を分離する。
+現在の GUI 実装では `app.py` は起動入口と配線に寄せ、以下を分離済みである。
 
 - `src/uc_rainfall/gui/actions.py`
   - ボタン押下時の処理
+- `src/uc_rainfall/gui/layout.py`
+  - 左右フレーム、タブ、各グループのレイアウト構築
 - `src/uc_rainfall/gui/validation.py`
   - 入力検証
+- `src/uc_rainfall/gui/test_mode.py`
+  - AI テストモードの操作要求処理
+  - widget tree / screenshot / action result の制御
 
-初期実装では分割しすぎず、まずは `app.py + state.py + logging_handler.py + widgets.py + context_store.py` で十分。
+分離順序は次のとおり進めた。
+
+1. `test_mode.py`
+2. `validation.py`
+3. `layout.py`
+4. `actions.py`
+
+この順序により、影響範囲が狭い責務から順に切り出した。
 
 
 ## 5. 画面単位の実装範囲

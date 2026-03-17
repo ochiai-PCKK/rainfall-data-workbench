@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import scrolledtext, ttk
 from collections.abc import Callable
+from tkinter import scrolledtext, ttk
 
-
-RegisterFn = Callable[[str, tk.Widget, str, str], None]
+RegisterFn = Callable[[str, tk.Misc, str, str], None]
 
 
 def add_labeled_entry(
-    parent: ttk.Frame,
+    parent: tk.Misc,
     *,
     row: int,
     label_text: str,
@@ -31,7 +30,7 @@ def add_labeled_entry(
 
 
 def add_labeled_combobox(
-    parent: ttk.Frame,
+    parent: tk.Misc,
     *,
     row: int,
     label_text: str,
@@ -54,7 +53,7 @@ def add_labeled_combobox(
 
 
 def add_labeled_text(
-    parent: ttk.Frame,
+    parent: tk.Misc,
     *,
     row: int,
     label_text: str,
@@ -75,7 +74,7 @@ def add_labeled_text(
 
 
 def add_scrolled_log(
-    parent: ttk.Frame,
+    parent: tk.Misc,
     *,
     widget_id: str,
     register_widget: RegisterFn,

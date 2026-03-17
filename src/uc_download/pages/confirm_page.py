@@ -43,6 +43,11 @@ class ConfirmPage:
             "dialog_message": None,
             "ok_clicked": False,
             "confirm_tab_closed": False,
+            "server_error_tab_seen": False,
+            "server_error_tab_closed": False,
+            "server_error_tab_url": None,
+            "server_error_tab_title": None,
+            "server_error_on_confirm_page": False,
         }
 
         def _handle_dialog(dialog) -> None:
@@ -55,6 +60,21 @@ class ConfirmPage:
 
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            if self._is_server_error_page(self.page):
+                observed["server_error_tab_seen"] = True
+                observed["server_error_tab_url"] = self._safe_url(self.page)
+                observed["server_error_tab_title"] = self._safe_title(self.page)
+                observed["server_error_on_confirm_page"] = True
+                try:
+                    self.page.close()
+                    observed["server_error_tab_closed"] = True
+                    observed["confirm_tab_closed"] = True
+                except PlaywrightError:
+                    observed["server_error_tab_closed"] = False
+                return AcceptanceResult(**observed)
+
+            self._close_server_error_tabs(observed)
+
             if self.page.is_closed():
                 observed["confirm_tab_closed"] = True
                 break
@@ -85,6 +105,51 @@ class ConfirmPage:
             except PlaywrightError:
                 observed["confirm_tab_closed"] = True
         return AcceptanceResult(**observed)
+
+    def _close_server_error_tabs(self, observed: dict[str, object]) -> None:
+        """500 エラーの新規タブを検知したら閉じる。"""
+        context = self.page.context
+        for tab in context.pages:
+            if tab == self.page or tab.is_closed():
+                continue
+            if self._is_server_error_page(tab):
+                observed["server_error_tab_seen"] = True
+                observed["server_error_tab_url"] = self._safe_url(tab)
+                observed["server_error_tab_title"] = self._safe_title(tab)
+                try:
+                    tab.close()
+                    observed["server_error_tab_closed"] = True
+                except PlaywrightError:
+                    observed["server_error_tab_closed"] = False
+
+    def _is_server_error_page(self, page: Page) -> bool:
+        """500 Internal Server Error 相当のタブかを判定する。"""
+        title = (self._safe_title(page) or "").lower()
+        if "500 internal server error" in title:
+            return True
+        url = (self._safe_url(page) or "").lower()
+        if "/convert/" in url:
+            try:
+                body = page.locator("body")
+                if body.count() > 0:
+                    text = body.first.inner_text(timeout=500).lower()
+                    if "internal server error" in text:
+                        return True
+            except PlaywrightError:
+                return False
+        return False
+
+    def _safe_title(self, page: Page) -> str | None:
+        try:
+            return page.title()
+        except PlaywrightError:
+            return None
+
+    def _safe_url(self, page: Page) -> str | None:
+        try:
+            return page.url
+        except PlaywrightError:
+            return None
 
     def snapshot(self) -> dict[str, object]:
         """現在画面の要約を返す。"""

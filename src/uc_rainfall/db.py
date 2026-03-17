@@ -111,14 +111,14 @@ def upsert_grid(conn: sqlite3.Connection, grid: GridDefinition) -> None:
 def replace_cell_timeseries(
     conn: sqlite3.Connection,
     dataset_id: str,
-    rows: Iterable[tuple[str, int, int, float, float, float | None, str | None]],
+    rows: Iterable[tuple[str, int, int, float, float, float | None]],
 ) -> None:
     """指定 `dataset_id` のセル時系列を全置換する。"""
     conn.execute("DELETE FROM cell_timeseries WHERE dataset_id = ?", (dataset_id,))
     conn.executemany(
         """
-        INSERT INTO cell_timeseries(dataset_id, observed_at, row, col, x_center, y_center, rainfall_mm, quality)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO cell_timeseries(dataset_id, observed_at, row, col, x_center, y_center, rainfall_mm)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         ((dataset_id, *row) for row in rows),
     )

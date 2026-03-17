@@ -1,0 +1,451 @@
+from __future__ import annotations
+
+from datetime import datetime, time, timedelta
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from rasterio.warp import transform_bounds
+
+from .errors import ZipFlowError
+from .graph_builder import (
+    build_metric_frame,
+    find_metric_peaks,
+    render_region_plots,
+    render_region_plots_reference,
+)
+from .logger import build_logger
+from .models import RunConfig
+from .raster_writer import write_asc, write_rain_dat_blocks, write_tiff
+from .regions import load_region_specs
+from .spatial_clip import (
+    NODATA_VALUE,
+    RegionRaster,
+    build_overlap_weights,
+    clip_masked_bbox,
+    clip_region,
+    clip_region_bbox,
+    compute_weighted_sum,
+    read_and_reproject_4326,
+    read_and_reproject_6674,
+    transform_geometry,
+    validate_region_alignment,
+)
+from .time_series_builder import build_5day_slots
+from .zip_reader import build_raster_index, extract_target_zips, resolve_slot_rasters
+from .zip_selector import select_target_zips
+
+
+def _window_range(base_date) -> tuple[datetime, datetime]:
+    start = datetime.combine(base_date - timedelta(days=2), time(hour=0))
+    end = datetime.combine(base_date + timedelta(days=2), time(hour=23))
+    return start, end
+
+
+def _prepare_outputs(config: RunConfig) -> tuple[Path, Path, Path, Path, Path, Path]:
+    base_dir = config.output_root / config.base_date.strftime("%Y-%m-%d")
+    raster_dir = base_dir / "raster"
+    raster_bbox_dir = base_dir / "raster_bbox"
+    plot_dir = base_dir / "plots"
+    plot_ref_dir = base_dir / "plots_reference"
+    csv_dir = base_dir / "timeseries_csv"
+    log_dir = base_dir / "logs"
+    if "raster" in config.output_kinds:
+        raster_dir.mkdir(parents=True, exist_ok=True)
+    if "raster_bbox" in config.output_kinds:
+        raster_bbox_dir.mkdir(parents=True, exist_ok=True)
+    if "plots" in config.output_kinds:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+    if "plots_ref" in config.output_kinds:
+        plot_ref_dir.mkdir(parents=True, exist_ok=True)
+    if "timeseries_csv" in config.output_kinds:
+        csv_dir.mkdir(parents=True, exist_ok=True)
+    if config.enable_log:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    return raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir
+
+
+def _required_coverage_ok(*, selected, window_start: datetime, window_end: datetime) -> bool:
+    """選定 ZIP の期間で対象5日を連続被覆できるか簡易判定する。"""
+    pointer = window_start
+    for item in sorted(selected, key=lambda z: z.start_at):
+        if item.end_at < pointer:
+            continue
+        if item.start_at > pointer:
+            return False
+        pointer = max(pointer, item.end_at + timedelta(hours=1))
+        if pointer > window_end:
+            return True
+    return pointer > window_end
+
+
+def _write_timeseries_csv_readme(*, csv_dir: Path, base_date, region_keys: list[str]) -> Path:
+    readme_path = csv_dir / "README_ja.txt"
+    text = (
+        "UC Rainfall ZIP Flow - timeseries_csv 説明\n"
+        "\n"
+        f"基準日: {base_date:%Y-%m-%d}\n"
+        f"対象流域: {', '.join(region_keys)}\n"
+        "時系列点数: 120 (基準日の前後2日を含む5日間・1時間間隔)\n"
+        "\n"
+        "各CSVの列定義:\n"
+        "- observed_at_jst: 観測時刻（JST, YYYY-MM-DD HH:MM:SS）\n"
+        "- elapsed_seconds: 基準期間先頭からの経過秒\n"
+        "- weighted_sum_mm: 重み付き合計雨量 [mm]\n"
+        "- valid_weight: 有効セルの重み合計（欠損除外後）\n"
+        "- total_weight: 流域内理論重み合計（欠損除外前）\n"
+        "- coverage_ratio: valid_weight / total_weight\n"
+        "- weighted_mean_mm: 重み付き平均雨量 [mm] = weighted_sum_mm / valid_weight\n"
+        "\n"
+        "流域セルCSV（*_cells.csv）の列定義:\n"
+        "- local_row, local_col: 切り出し後のローカル行列番号\n"
+        "- center_x_6674, center_y_6674: セル中心座標（EPSG:6674）\n"
+        "- cell_weight: 流域との重なり比（0〜1）\n"
+        "- cell_area_6674: セル面積（EPSG:6674 座標系上）\n"
+        "\n"
+        "補足:\n"
+        "- ポリゴン境界で切れるセルは、交差面積比（0〜1）を重みとして計算します。\n"
+        "- coverage_ratio < 0.999 の時刻がある場合はエラーとして処理を中断します。\n"
+        "- weighted_mean_mm は再計算可能です（weighted_sum_mm ÷ valid_weight）。\n"
+        "- *_cells.csv は先頭時刻の格子で作成します。\n"
+    )
+    readme_path.write_text(text, encoding="utf-8")
+    return readme_path
+
+
+GridSignature = tuple[tuple[int, int], tuple[float, float, float, float, float, float]]
+
+
+def _grid_signature(region_raster: RegionRaster) -> GridSignature:
+    tfm = region_raster.transform
+    return region_raster.data.shape, (tfm.a, tfm.b, tfm.c, tfm.d, tfm.e, tfm.f)
+
+
+def _build_cell_catalog_rows(region_raster: RegionRaster, weights: np.ndarray) -> list[dict[str, float | int]]:
+    rows: list[dict[str, float | int]] = []
+    cell_area = abs(region_raster.transform.a * region_raster.transform.e)
+    nrows, ncols = region_raster.data.shape
+    for r in range(nrows):
+        for c in range(ncols):
+            weight = float(weights[r, c])
+            if weight <= 0.0:
+                continue
+            center_x, center_y = region_raster.transform * (c + 0.5, r + 0.5)
+            rows.append(
+                {
+                    "local_row": r,
+                    "local_col": c,
+                    "center_x_6674": float(center_x),
+                    "center_y_6674": float(center_y),
+                    "cell_weight": weight,
+                    "cell_area_6674": float(cell_area),
+                }
+            )
+    return rows
+
+
+def run_zipflow(config: RunConfig) -> dict[str, object]:
+    """ZIP Flow 実行本体。"""
+    raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir = _prepare_outputs(config)
+    log_path = log_dir / f"{config.base_date:%Y-%m-%d}.log"
+    logger = build_logger(enable_file=config.enable_log, log_path=log_path)
+
+    window_start, window_end = _window_range(config.base_date)
+    slots = build_5day_slots(config.base_date)
+    logger.info("対象期間: %s 〜 %s (120点)", window_start, window_end)
+
+    try:
+        selected = select_target_zips(
+            input_zipdir=config.input_zipdir,
+            window_start=window_start,
+            window_end=window_end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ZipFlowError(f"ZIP 選定に失敗しました: {exc}", exit_code=3) from exc
+    logger.info("採用 ZIP: %s", [item.path.name for item in selected])
+    if not _required_coverage_ok(selected=selected, window_start=window_start, window_end=window_end):
+        raise ZipFlowError("採用 ZIP の期間が対象5日を連続で覆っていません。", exit_code=3)
+
+    try:
+        all_regions = load_region_specs(config.polygon_dir)
+    except Exception as exc:  # noqa: BLE001
+        raise ZipFlowError(f"空間領域の読込に失敗しました: {exc}", exit_code=6) from exc
+    by_key = {region.region_key: region for region in all_regions}
+    missing_keys = [key for key in config.region_keys if key not in by_key]
+    if missing_keys:
+        raise ZipFlowError(f"未定義の region_key が指定されました: {missing_keys}", exit_code=2)
+    regions = [by_key[key] for key in config.region_keys]
+    geom_4326_by_region = {
+        region.region_key: transform_geometry(region.geometry_6674, src_crs="EPSG:6674", dst_crs="EPSG:4326")
+        for region in regions
+    }
+    bbox_4326_by_region = {
+        region.region_key: transform_bounds("EPSG:6674", "EPSG:4326", *region.bbox_6674, densify_pts=21)
+        for region in regions
+    }
+    logger.info("領域: %s", [r.region_key for r in regions])
+
+    observed_at = [slot.observed_at_jst for slot in slots]
+    enable_any_plot = "plots" in config.output_kinds or "plots_ref" in config.output_kinds
+    enable_timeseries_csv = "timeseries_csv" in config.output_kinds
+    enable_weight_calc = enable_any_plot or enable_timeseries_csv
+    weighted_series: dict[str, list[float]] = {region.region_key: [] for region in regions} if enable_any_plot else {}
+    weighted_rows: dict[str, list[dict[str, object]]] = (
+        {region.region_key: [] for region in regions} if enable_timeseries_csv else {}
+    )
+    cell_catalog_rows: dict[str, list[dict[str, float | int]]] = (
+        {region.region_key: [] for region in regions} if enable_timeseries_csv else {}
+    )
+    cell_catalog_signature: dict[str, GridSignature | None] = (
+        {region.region_key: None for region in regions} if enable_timeseries_csv else {}
+    )
+    ref_raster_cache: dict[str, RegionRaster] = {}
+    ref_bbox_cache: dict[str, RegionRaster] = {}
+    bbox_frames: dict[str, list[np.ndarray]] = {region.region_key: [] for region in regions}
+    elapsed_seconds = [slot.relative_seconds for slot in slots]
+
+    try:
+        with extract_target_zips(selected) as extracted:
+            raster_index = build_raster_index(extracted)
+            slot_rasters = resolve_slot_rasters(slots=slots, raster_index=raster_index)
+
+            if len(slot_rasters) != 120:
+                raise ZipFlowError(f"時系列点数が 120 ではありません: {len(slot_rasters)}", exit_code=5)
+
+            for slot, raster_path in zip(slots, slot_rasters, strict=True):
+                arr_6674 = None
+                transform_6674 = None
+                if enable_weight_calc:
+                    arr_6674, transform_6674, _ = read_and_reproject_6674(raster_path)
+
+                arr_4326 = None
+                transform_4326 = None
+                if "raster_bbox" in config.output_kinds or "raster" in config.output_kinds:
+                    arr_4326, transform_4326, _ = read_and_reproject_4326(raster_path)
+
+                for region in regions:
+                    clipped = None
+                    if enable_weight_calc:
+                        assert arr_6674 is not None and transform_6674 is not None
+                        clipped = clip_region(
+                            full_data=arr_6674,
+                            full_transform=transform_6674,
+                            region=region,
+                        )
+
+                    if enable_weight_calc:
+                        assert clipped is not None
+                        weights = build_overlap_weights(clipped, region.geometry_6674)
+                        total_weight = float(np.sum(weights))
+                        if total_weight <= 0.0:
+                            raise ZipFlowError(
+                                f"流域内重みが0です: region={region.region_key} time={slot.observed_at_jst}",
+                                exit_code=5,
+                            )
+                        valid_mask = (clipped.data != NODATA_VALUE) & np.isfinite(clipped.data) & (weights > 0.0)
+                        valid_weight = float(np.sum(weights[valid_mask]))
+                        coverage = valid_weight / total_weight
+                        if coverage < 0.999:
+                            raise ZipFlowError(
+                                "流域内に欠損（穴）があるため処理を中断しました: "
+                                f"region={region.region_key} time={slot.observed_at_jst:%Y-%m-%d %H:%M:%S} "
+                                f"coverage={coverage:.6f}",
+                                exit_code=5,
+                            )
+
+                        weighted_value = compute_weighted_sum(clipped.data, weights)
+                        if not np.isfinite(weighted_value):
+                            detail = f"region={region.region_key} time={slot.observed_at_jst}"
+                            raise ZipFlowError(
+                                f"重み付き合計を計算できませんでした: {detail}",
+                                exit_code=5,
+                            )
+                        if enable_any_plot:
+                            weighted_series[region.region_key].append(weighted_value)
+                        if enable_timeseries_csv:
+                            weighted_mean = weighted_value / valid_weight if valid_weight > 0.0 else float("nan")
+                            weighted_rows[region.region_key].append(
+                                {
+                                    "observed_at_jst": slot.observed_at_jst.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "elapsed_seconds": slot.relative_seconds,
+                                    "weighted_sum_mm": weighted_value,
+                                    "valid_weight": valid_weight,
+                                    "total_weight": total_weight,
+                                    "coverage_ratio": coverage,
+                                    "weighted_mean_mm": weighted_mean,
+                                }
+                            )
+                            signature = _grid_signature(clipped)
+                            if cell_catalog_signature[region.region_key] is None:
+                                cell_catalog_signature[region.region_key] = signature
+                                cell_catalog_rows[region.region_key] = _build_cell_catalog_rows(clipped, weights)
+                            elif signature != cell_catalog_signature[region.region_key]:
+                                logger.warning(
+                                    "流域セルCSVは先頭時刻格子で出力します（格子差異あり）: region=%s time=%s",
+                                    region.region_key,
+                                    slot.observed_at_jst.strftime("%Y-%m-%d %H:%M:%S"),
+                                )
+
+                    clipped_bbox = None
+                    if "raster_bbox" in config.output_kinds:
+                        assert arr_4326 is not None and transform_4326 is not None
+                        clipped_bbox = clip_region_bbox(
+                            full_data=arr_4326,
+                            full_transform=transform_4326,
+                            bbox=bbox_4326_by_region[region.region_key],
+                        )
+                        ref_bbox = ref_bbox_cache.get(region.region_key)
+                        if ref_bbox is None:
+                            ref_bbox_cache[region.region_key] = clipped_bbox
+                        else:
+                            validate_region_alignment(ref_bbox, clipped_bbox)
+                        bbox_frames[region.region_key].append(clipped_bbox.data.copy())
+
+                    clipped_raster = None
+                    if "raster" in config.output_kinds:
+                        assert arr_4326 is not None and transform_4326 is not None
+                        clipped_raster = clip_masked_bbox(
+                            full_data=arr_4326,
+                            full_transform=transform_4326,
+                            bbox=bbox_4326_by_region[region.region_key],
+                            geometry=geom_4326_by_region[region.region_key],
+                            out_crs="EPSG:4326",
+                        )
+                        ref_raster = ref_raster_cache.get(region.region_key)
+                        if ref_raster is None:
+                            ref_raster_cache[region.region_key] = clipped_raster
+                        else:
+                            validate_region_alignment(ref_raster, clipped_raster)
+
+                    stamp = slot.observed_at_jst.strftime("%Y%m%d%H")
+                    if "raster" in config.output_kinds:
+                        assert clipped_raster is not None
+                        raster_base = raster_dir / region.region_key
+                        tiff_path = raster_base / f"{region.region_key}_{stamp}.tif"
+                        asc_path = raster_base / f"{region.region_key}_{stamp}.asc"
+                        legacy_dat_path = raster_base / f"{region.region_key}_{stamp}.dat"
+                        write_tiff(
+                            path=tiff_path,
+                            data=clipped_raster.data,
+                            transform=clipped_raster.transform,
+                            crs=clipped_raster.crs,
+                        )
+                        write_asc(path=asc_path, data=clipped_raster.data, transform=clipped_raster.transform)
+                        if legacy_dat_path.exists():
+                            legacy_dat_path.unlink()
+                    if "raster_bbox" in config.output_kinds:
+                        assert clipped_bbox is not None
+                        raster_bbox_base = raster_bbox_dir / region.region_key
+                        tiff_bbox_name = f"rain_{region.region_key}_{slot.observed_at_jst:%Y%m%d%H}.tif"
+                        write_tiff(
+                            path=raster_bbox_base / tiff_bbox_name,
+                            data=clipped_bbox.data,
+                            transform=clipped_bbox.transform,
+                            crs=clipped_bbox.crs,
+                            nodata=None,
+                        )
+    except ZipFlowError:
+        raise
+    except ValueError as exc:
+        message = str(exc)
+        if "不足" in message or "120" in message or "時系列" in message:
+            raise ZipFlowError(message, exit_code=5) from exc
+        if "transform" in message or "BBox" in message or "CRS" in message:
+            raise ZipFlowError(message, exit_code=6) from exc
+        raise ZipFlowError(f"データ読込に失敗しました: {message}", exit_code=4) from exc
+    except OSError as exc:
+        raise ZipFlowError(f"出力書込に失敗しました: {exc}", exit_code=7) from exc
+
+    if "raster_bbox" in config.output_kinds:
+        for region in regions:
+            if len(bbox_frames[region.region_key]) != 120:
+                count = len(bbox_frames[region.region_key])
+                raise ZipFlowError(
+                    f"領域 {region.region_key} の raster_bbox 点数が 120 ではありません: {count}",
+                    exit_code=5,
+                )
+            write_rain_dat_blocks(
+                path=raster_bbox_dir / region.region_key / "rain.dat",
+                frames=bbox_frames[region.region_key],
+                elapsed_seconds=elapsed_seconds,
+            )
+
+    csv_paths: list[Path] = []
+    cell_csv_paths: list[Path] = []
+    csv_readme_path: Path | None = None
+    if enable_timeseries_csv:
+        for region in regions:
+            rows = weighted_rows[region.region_key]
+            if len(rows) != 120:
+                raise ZipFlowError(
+                    f"領域 {region.region_key} のCSV系列点数が 120 ではありません: {len(rows)}",
+                    exit_code=5,
+                )
+            out_csv = csv_dir / region.region_key / f"{region.region_key}_{config.base_date:%Y%m%d}_timeseries.csv"
+            out_csv.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(rows).to_csv(out_csv, index=False, encoding="utf-8-sig")
+            csv_paths.append(out_csv)
+            out_cell_csv = csv_dir / region.region_key / f"{region.region_key}_{config.base_date:%Y%m%d}_cells.csv"
+            pd.DataFrame(cell_catalog_rows[region.region_key]).to_csv(out_cell_csv, index=False, encoding="utf-8-sig")
+            cell_csv_paths.append(out_cell_csv)
+        csv_readme_path = _write_timeseries_csv_readme(
+            csv_dir=csv_dir,
+            base_date=config.base_date,
+            region_keys=[r.region_key for r in regions],
+        )
+
+    plot_paths: list[Path] = []
+    if enable_any_plot:
+        for region in regions:
+            series = weighted_series[region.region_key]
+            if len(series) != 120:
+                raise ZipFlowError(
+                    f"領域 {region.region_key} の系列点数が 120 ではありません: {len(series)}",
+                    exit_code=5,
+                )
+            frame = build_metric_frame(observed_at=observed_at, weighted_sum=series)
+            try:
+                peaks = find_metric_peaks(frame)
+                if "plots" in config.output_kinds:
+                    plot_paths.extend(
+                        render_region_plots(
+                            frame=frame,
+                            peaks=peaks,
+                            region_key=region.region_key,
+                            region_label=region.region_name,
+                            output_dir=plot_dir,
+                        )
+                    )
+                if "plots_ref" in config.output_kinds:
+                    plot_paths.extend(
+                        render_region_plots_reference(
+                            frame=frame,
+                            region_key=region.region_key,
+                            region_label=region.region_name,
+                            output_dir=plot_ref_dir,
+                            base_date=config.base_date,
+                        )
+                    )
+            except OSError as exc:
+                raise ZipFlowError(f"グラフ出力に失敗しました: {exc}", exit_code=7) from exc
+
+    logger.info(
+        "出力完了: outputs=%s regions=%s plot=%s",
+        config.output_kinds,
+        [r.region_key for r in regions],
+        len(plot_paths),
+    )
+    return {
+        "base_dir": str(raster_dir.parent),
+        "raster_dir": str(raster_dir) if "raster" in config.output_kinds else None,
+        "raster_bbox_dir": str(raster_bbox_dir) if "raster_bbox" in config.output_kinds else None,
+        "plot_dir": str(plot_dir) if "plots" in config.output_kinds else None,
+        "plot_ref_dir": str(plot_ref_dir) if "plots_ref" in config.output_kinds else None,
+        "timeseries_csv_dir": str(csv_dir) if "timeseries_csv" in config.output_kinds else None,
+        "log_path": str(log_path) if config.enable_log else None,
+        "zip_count": len(selected),
+        "plot_count": len(plot_paths),
+        "csv_count": len(csv_paths),
+        "cell_csv_count": len(cell_csv_paths),
+        "csv_readme_path": str(csv_readme_path) if csv_readme_path else None,
+    }

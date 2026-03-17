@@ -71,7 +71,7 @@ def iter_cell_rows(
     observed_times: list[datetime],
     matrices: list[list[list[float]]],
     grid: GridDefinition,
-) -> Iterable[tuple[str, int, int, float, float, float | None, str | None]]:
+) -> Iterable[tuple[str, int, int, float, float, float | None]]:
     """行列データを DB 登録用のセル時系列レコードへ展開する。"""
     if len(observed_times) != len(matrices):
         raise ValueError(f"観測時刻数と行列ブロック数が一致しません: {len(observed_times)} != {len(matrices)}")
@@ -93,5 +93,4 @@ def iter_cell_rows(
                     x_center,
                     y_center,
                     rainfall_mm,
-                    "normal" if rainfall_mm is not None else "missing",
                 )

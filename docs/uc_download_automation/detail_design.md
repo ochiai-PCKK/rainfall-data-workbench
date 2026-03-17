@@ -2,18 +2,18 @@
 
 ## 1. 目的
 
-本書は、`requirements.md` および `experiment_results.md` を受けて、初期実装を進めるための詳細設計を定義する。
+本書は、`requirements.md` および `experiment_results.md` を受けて、既存実装の維持点と後段拡張の詳細設計を定義する。
 
 対象は、以下の 3 段階の機能とする。
 
-- フェーズ 1: ログインページから開始し、人手による OTP 入力後に同一ブラウザセッションで解析雨量のダウンロードリンク送信要求を繰り返し発行する
-- フェーズ 2: 人手でコピーしたメール本文を貼り付け入力し、ダウンロード URL とデータ期間を抽出して保存する
-- フェーズ 3: 保存済み URL を用いて ZIP を取得し、対象期間との対応を manifest として保存する
+- フェーズ 1: 既存実装として、ログインページから開始し、人手による OTP 入力後に同一ブラウザセッションで解析雨量のダウンロードリンク送信要求を繰り返し発行する
+- フェーズ 2: 新仕様として、人手でコピーしたメール本文を貼り付け入力し、ダウンロード URL とデータ期間を抽出して保存する
+- フェーズ 3: 新仕様として、保存済み URL を用いて ZIP を取得し、対象期間との対応を manifest として保存する
 
 
 ## 2. 実装対象範囲
 
-本実装で実施するもの:
+既存実装として成立済みのもの:
 
 - `tools.i-ric.info/login/` を開く
 - メールアドレス入力と `ログイン` 押下
@@ -24,31 +24,35 @@
 - 要求受理シグナルの検知
 - `2010-01-02` から `2025-12-31` までの 3 日単位ループ
 - 実行ログ、結果 JSON、スクリーンショット保存
+
+今回の拡張実装で追加するもの:
+
 - メール本文の貼り付け入力受付
 - メール本文からの URL とデータ期間の抽出
 - 取り込み済みメール群に対する連続性、重複、欠落チェック
 - 保存済み URL に対する ZIP ダウンロード
 - 期間と ZIP の対応を manifest として保存
-- `skipped` を含む人手判断結果の保存
+- 機械判定による取り込み結果と ZIP 取得結果の保存
+- メール本文貼り付けと ZIP 取得を補助する簡易 GUI
 
-本実装で実施しないもの:
+今回の拡張実装でも実施しないもの:
 
 - OTP の自動取得
 - メール受信箱の自動操作
 - メール本文のコピーや貼り付けそのものの自動化
 - `uc_rainfall` への自動取り込み
-- GUI アプリケーション
 
 
 ## 3. ディレクトリ構成案
 
-実装ファイルは `src` 配下で以下のように分割することを想定する。
+実装ファイルは `src` 配下で以下のように分割する。前段は概ね実装済みであり、後段ファイルを追加する想定とする。
 
 ```text
 src/
   uc_download/
     __init__.py
     cli.py
+    gui.py
     models.py
     config.py
     selectors.py
@@ -58,6 +62,7 @@ src/
     continuity_checker.py
     download_store.py
     zip_downloader.py
+    gui.py
     browser.py
     workflows/
       __init__.py
@@ -80,7 +85,7 @@ src/
 
 用途:
 
-- 既定値と実行設定をまとめる
+- 既存の既定値と、後段拡張で追加する実行設定をまとめる
 
 保持内容:
 
@@ -96,7 +101,7 @@ src/
 - ZIP 保存先ディレクトリ
 - ZIP ダウンロード時のタイムアウトや再試行設定
 
-初期実装の既定値:
+既存実装の既定値:
 
 - login URL: `https://tools.i-ric.info/login/`
 - parameter URL: `https://tools.i-ric.info/confirm/`
@@ -106,6 +111,9 @@ src/
 - chunk days: `3`
 - bbox preset: `yamatogawa`
 - bbox pad: `0.02`
+
+拡張時に追加する既定値:
+
 - mail ingest dir: `outputs/uc_download/mail_ingest`
 - zip dir: `outputs/uc_download/downloads`
 
@@ -114,9 +122,9 @@ src/
 
 用途:
 
-- ワークフロー間で受け渡すデータ構造を定義する
+- 既存ワークフローと、後段拡張ワークフロー間で受け渡すデータ構造を定義する
 
-主要 dataclass 案:
+既存実装済み dataclass:
 
 ```python
 @dataclass(frozen=True)
@@ -159,6 +167,11 @@ class RequestResult:
     confirm_tab_closed: bool
     screenshot_paths: tuple[Path, ...]
     message: str | None
+```
+
+拡張時に追加する dataclass:
+
+```python
 
 
 @dataclass(frozen=True)
@@ -200,10 +213,27 @@ class ZipDownloadResult:
 - `accepted_candidate` は `OK` / `dialog` は見えていないが、確認タブ閉鎖が起きたとき `True`
 - 後段で CSV/JSON 出力しやすいよう、単純なスカラー項目を中心にする
 - `MailEntry.source_id` は URL と期間から導ける一意キーとする
-- `ZipDownloadResult.status` は `downloaded`, `failed`, `skipped`, `already_exists` を想定する
+- `ZipDownloadResult.status` は `downloaded`, `failed`, `already_exists` を現行実装の基本状態とする
+- 将来、期限切れ URL を識別できる場合は `expired` を追加可能とする
 
 
-### 4.3 `selectors.py`
+### 4.3 `gui.py`
+
+用途:
+
+- メール本文貼り付け、クリップボード貼付、ZIP 取得を行う簡易 GUI を提供する
+
+責務:
+
+- メール本文貼り付け欄を表示する
+- `ingest_mail_bodies()` を GUI から実行する
+- `fetch_zips()` を GUI から実行する
+- クリップボード監視 ON/OFF を切り替える
+- `データ期間` と `ucrain.i-ric.info/download/` を含む本文を検知したら自動取り込みを実行する
+- `Ctrl+Enter`, `Ctrl+Shift+Enter`, `F5` などのショートカットを提供する
+
+
+### 4.4 `selectors.py`
 
 用途:
 
@@ -622,7 +652,7 @@ Acceptance 判定:
 備考:
 
 - 取り込み失敗 1 件で全体停止するのではなく、成功件と失敗件を分けて保存する
-- `skipped` は人手判断で付ける状態として保存可能にする
+- 取り込み結果は `ingested`, `duplicate`, `parse_failed` などの機械判定として保存する
 
 
 ### 6.5 `workflows/zip_fetch_workflow.py`
@@ -648,7 +678,7 @@ Acceptance 判定:
 実装方針:
 
 - 1 件失敗しても全体停止しない
-- 全件処理後に成功件数、失敗件数、スキップ件数を集計する
+- 全件処理後に成功件数、失敗件数、既取得再利用件数を集計する
 
 
 ## 7. CLI 詳細設計
@@ -714,6 +744,13 @@ uv run python -m uc_download.cli loop-request-links \
 
 - 貼り付けたメール本文を解析して保存する
 
+方針:
+
+- `--input-file` 指定時はファイルから読む
+- `--stdin` 指定時、または入力ファイル未指定かつ標準入力がパイプされている場合は標準入力から読む
+- gap / overlap / out_of_range などの warning が出た場合は、既定では非ゼロ終了にする
+- warning を許容して保存を継続したい場合だけ `--allow-warnings` を指定する
+
 例:
 
 ```bash
@@ -728,11 +765,29 @@ uv run python -m uc_download.cli ingest-mail-bodies \
 
 - 保存済み URL から ZIP を取得する
 
+方針:
+
+- summary の件数だけでなく、`failed` または `expired` の代表例を CLI 末尾に表示する
+- 代表例には少なくとも `source_id`, 期間, status, message を含める
+
 例:
 
 ```bash
 uv run python -m uc_download.cli fetch-zips \
   --status pending
+```
+
+
+#### `launch-gui`
+
+用途:
+
+- メール本文貼り付けと ZIP 取得のための簡易 GUI を開く
+
+例:
+
+```bash
+uv run python -m uc_download.cli launch-gui
 ```
 
 
@@ -811,7 +866,8 @@ uv run python -m uc_download.cli fetch-zips \
     "zip_status": "downloaded",
     "download_url": "https://ucrain.i-ric.info/download/158261951",
     "zip_path": "outputs/uc_download/downloads/20100102_20100104.zip",
-    "message": null
+    "message": null,
+    "response_preview": null
   }
 ]
 ```
@@ -865,6 +921,9 @@ uv run python -m uc_download.cli fetch-zips \
 - ZIP 保存後の manifest 更新に失敗する
 
 対応方針:
+
+- メール取り込みの warning は、保存結果と issue 保存を行った上で非ゼロ終了として返せるようにする
+- ZIP 取得失敗時は、summary に加えて代表的な失敗例を CLI に表示する
 
 - 例外を握りつぶさない
 - 失敗時点の期間を `RequestResult` として保存する

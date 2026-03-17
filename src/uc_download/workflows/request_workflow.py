@@ -38,6 +38,11 @@ def execute_request_flow(
     dialog_seen = False
     ok_clicked = False
     confirm_tab_closed = False
+    server_error_tab_seen = False
+    server_error_tab_closed = False
+    server_error_tab_url: str | None = None
+    server_error_tab_title: str | None = None
+    server_error_on_confirm_page = False
     final_url: str | None = None
     message: str | None = None
     confirm_popup: Page | None = None
@@ -92,7 +97,45 @@ def execute_request_flow(
         dialog_seen = acceptance.dialog_seen
         ok_clicked = acceptance.ok_clicked
         confirm_tab_closed = acceptance.confirm_tab_closed
+        server_error_tab_seen = acceptance.server_error_tab_seen
+        server_error_tab_closed = acceptance.server_error_tab_closed
+        server_error_tab_url = acceptance.server_error_tab_url
+        server_error_tab_title = acceptance.server_error_tab_title
+        server_error_on_confirm_page = acceptance.server_error_on_confirm_page
         final_url = final_url or _safe_page_url(confirm_popup) or page.url
+
+        if server_error_tab_seen:
+            LOGGER.warning(
+                "500 Internal Server Error を検知しました。window=%s closed=%s url=%s on_confirm_page=%s",
+                window.label,
+                server_error_tab_closed,
+                server_error_tab_url,
+                server_error_on_confirm_page,
+            )
+
+        if server_error_on_confirm_page:
+            return RequestResult(
+                window=window,
+                accepted=False,
+                accepted_candidate=False,
+                final_url=final_url,
+                parameter_page_detected=parameter_page_detected,
+                confirm_page_detected=confirm_page_detected,
+                parameter_bbox=parameter_bbox,
+                confirm_bbox=confirm_bbox,
+                dialog_seen=dialog_seen,
+                ok_clicked=ok_clicked,
+                confirm_tab_closed=confirm_tab_closed,
+                server_error_tab_seen=server_error_tab_seen,
+                server_error_tab_closed=server_error_tab_closed,
+                server_error_tab_url=server_error_tab_url,
+                server_error_tab_title=server_error_tab_title,
+                server_error_on_confirm_page=server_error_on_confirm_page,
+                screenshot_paths=tuple(screenshot_paths),
+                message="確認タブ上で 500 Internal Server Error を検知しました。",
+                started_at=started_at,
+                finished_at=datetime.now(),
+            )
 
         if acceptance.accepted:
             LOGGER.info("要求受理を確認しました。window=%s", window.label)
@@ -122,6 +165,11 @@ def execute_request_flow(
             dialog_seen=dialog_seen,
             ok_clicked=ok_clicked,
             confirm_tab_closed=confirm_tab_closed,
+            server_error_tab_seen=server_error_tab_seen,
+            server_error_tab_closed=server_error_tab_closed,
+            server_error_tab_url=server_error_tab_url,
+            server_error_tab_title=server_error_tab_title,
+            server_error_on_confirm_page=server_error_on_confirm_page,
             screenshot_paths=tuple(screenshot_paths),
             message=None,
             started_at=started_at,
@@ -151,6 +199,11 @@ def execute_request_flow(
             dialog_seen=dialog_seen,
             ok_clicked=ok_clicked,
             confirm_tab_closed=confirm_tab_closed,
+            server_error_tab_seen=server_error_tab_seen,
+            server_error_tab_closed=server_error_tab_closed,
+            server_error_tab_url=server_error_tab_url,
+            server_error_tab_title=server_error_tab_title,
+            server_error_on_confirm_page=server_error_on_confirm_page,
             screenshot_paths=tuple(screenshot_paths),
             message=message,
             started_at=started_at,

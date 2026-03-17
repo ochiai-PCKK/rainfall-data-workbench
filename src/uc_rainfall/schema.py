@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS cell_timeseries (
   x_center REAL NOT NULL,
   y_center REAL NOT NULL,
   rainfall_mm REAL,
-  quality TEXT,
   PRIMARY KEY (dataset_id, observed_at, row, col),
   FOREIGN KEY (dataset_id) REFERENCES datasets(dataset_id)
 );

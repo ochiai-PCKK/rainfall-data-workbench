@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from pathlib import Path
 import logging
 import re
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 
 from ..db import open_db
-from .candidate_service import _build_canonical_candidate_cells, list_candidate_cells
 from ..graph import add_metric_columns, find_metric_events, render_metric_chart
+from .candidate_service import _build_canonical_candidate_cells
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,14 +22,28 @@ def _safe_token(value: str) -> str:
 
 def _grid_matches(left: pd.Series, right: pd.Series, *, tol: float = 1e-6) -> bool:
     """格子定義が同一かどうかを許容誤差付きで判定する。"""
+    left_grid_crs = str(left["grid_crs"])
+    right_grid_crs = str(right["grid_crs"])
+    left_origin_x = float(cast(Any, left["origin_x"]))
+    right_origin_x = float(cast(Any, right["origin_x"]))
+    left_origin_y = float(cast(Any, left["origin_y"]))
+    right_origin_y = float(cast(Any, right["origin_y"]))
+    left_cell_width = float(cast(Any, left["cell_width"]))
+    right_cell_width = float(cast(Any, right["cell_width"]))
+    left_cell_height = float(cast(Any, left["cell_height"]))
+    right_cell_height = float(cast(Any, right["cell_height"]))
+    left_rows = int(cast(Any, left["rows"]))
+    right_rows = int(cast(Any, right["rows"]))
+    left_cols = int(cast(Any, left["cols"]))
+    right_cols = int(cast(Any, right["cols"]))
     return (
-        str(left["grid_crs"]) == str(right["grid_crs"])
-        and abs(float(left["origin_x"]) - float(right["origin_x"])) <= tol
-        and abs(float(left["origin_y"]) - float(right["origin_y"])) <= tol
-        and abs(float(left["cell_width"]) - float(right["cell_width"])) <= tol
-        and abs(float(left["cell_height"]) - float(right["cell_height"])) <= tol
-        and int(left["rows"]) == int(right["rows"])
-        and int(left["cols"]) == int(right["cols"])
+        left_grid_crs == right_grid_crs
+        and abs(left_origin_x - right_origin_x) <= tol
+        and abs(left_origin_y - right_origin_y) <= tol
+        and abs(left_cell_width - right_cell_width) <= tol
+        and abs(left_cell_height - right_cell_height) <= tol
+        and left_rows == right_rows
+        and left_cols == right_cols
     )
 
 
@@ -75,19 +90,19 @@ def _fetch_compatible_frames(
     placeholders = ",".join("?" for _ in compatible_dataset_ids)
     frame = pd.read_sql_query(
         f"""
-        SELECT dataset_id, observed_at, rainfall_mm, quality
+        SELECT dataset_id, observed_at, rainfall_mm
         FROM cell_timeseries
         WHERE dataset_id IN ({placeholders}) AND row = ? AND col = ? AND observed_at BETWEEN ? AND ?
         ORDER BY observed_at
         """,
         conn,
-        params=(
+        params=[
             *compatible_dataset_ids,
             row,
             col,
             calc_start.isoformat(timespec="seconds"),
             view_end.isoformat(timespec="seconds"),
-        ),
+        ],
     )
     return frame, compatible_dataset_ids
 
@@ -115,11 +130,29 @@ def _load_compatible_dataset_ids_for_dataset(
         raise ValueError(f"格子定義が見つかりません: dataset_id={dataset_id}")
     anchor_row = anchor.iloc[0]
     compatible = [
-        row["dataset_id"]
+        str(row["dataset_id"])
         for _, row in grids.iterrows()
         if _grid_matches(row, anchor_row)
     ]
     return _sort_dataset_ids(compatible, anchor_dataset_id=dataset_id)
+
+
+def _load_compatible_dataset_ids(
+    grids: pd.DataFrame,
+    *,
+    anchor_dataset_id: str,
+) -> list[str]:
+    """格子定義 DataFrame から、起点と同一格子の dataset 一覧を返す。"""
+    anchor = grids.loc[grids["dataset_id"] == anchor_dataset_id]
+    if anchor.empty:
+        raise ValueError(f"格子定義が見つかりません: dataset_id={anchor_dataset_id}")
+    anchor_row = anchor.iloc[0]
+    compatible = [
+        str(row["dataset_id"])
+        for _, row in grids.iterrows()
+        if _grid_matches(row, anchor_row)
+    ]
+    return _sort_dataset_ids(compatible, anchor_dataset_id=anchor_dataset_id)
 
 
 def _load_candidate_cell_table(
@@ -199,7 +232,8 @@ def _resolve_anchor_cell(
     if filtered.empty:
         raise ValueError(f"指定セルが流域 {polygon_name} の候補セルに見つかりません")
     if len(filtered) > 1 and dataset_id is None:
-        filtered = filtered.sort_values(["dataset_id", "row", "col"]).head(1)
+        filtered_df = cast(pd.DataFrame, filtered)
+        filtered = cast(pd.DataFrame, filtered_df.sort_values(by=["dataset_id", "row", "col"]).head(1))
     elif len(filtered) > 1:
         raise ValueError("指定セルが一意に定まりません")
 
@@ -243,11 +277,11 @@ def _find_position_matched_cells(
     if matched.empty:
         raise ValueError("同一位置に一致する候補セルが見つかりません")
 
-    counts = matched.groupby("dataset_id").size()
-    duplicates = counts[counts > 1]
+    counts = cast(pd.Series, matched.groupby("dataset_id").size())
+    duplicates = cast(pd.Series, counts[counts > 1])
     if not duplicates.empty:
         raise ValueError(f"同一 dataset 内で位置一致セルが複数見つかりました: {duplicates.to_dict()}")
-    return matched
+    return cast(pd.DataFrame, matched)
 
 
 def _fetch_position_matched_frames(
@@ -260,23 +294,26 @@ def _fetch_position_matched_frames(
     """位置一致したセル群の時系列を取得する。"""
     frames: list[pd.DataFrame] = []
     dataset_ids: list[str] = []
-    for item in matched_cells.itertuples(index=False):
-        dataset_ids.append(str(item.dataset_id))
+    for _, item in matched_cells.iterrows():
+        dataset_id = str(item["dataset_id"])
+        row = int(cast(Any, item["row"]))
+        col = int(cast(Any, item["col"]))
+        dataset_ids.append(dataset_id)
         part = pd.read_sql_query(
             """
-            SELECT dataset_id, observed_at, rainfall_mm, quality
+            SELECT dataset_id, observed_at, rainfall_mm
             FROM cell_timeseries
             WHERE dataset_id = ? AND row = ? AND col = ? AND observed_at BETWEEN ? AND ?
             ORDER BY observed_at
             """,
             conn,
-            params=(
-                item.dataset_id,
-                int(item.row),
-                int(item.col),
+            params=[
+                dataset_id,
+                row,
+                col,
                 calc_start.isoformat(timespec="seconds"),
                 view_end.isoformat(timespec="seconds"),
-            ),
+            ],
         )
         frames.append(part)
 
@@ -303,8 +340,8 @@ def _deduplicate_rows(
             next_priority += 1
 
     ranked = frame.copy()
-    ranked["priority"] = ranked["dataset_id"].map(dataset_priority)
-    ranked = ranked.sort_values([*subset_cols, "priority", "dataset_id"]).reset_index(drop=True)
+    ranked["priority"] = ranked["dataset_id"].map(lambda dataset_id: dataset_priority.get(str(dataset_id), 9999))
+    ranked = cast(pd.DataFrame, ranked.sort_values(by=[*subset_cols, "priority", "dataset_id"]).reset_index(drop=True))
 
     duplicated = ranked[ranked.duplicated(subset=subset_cols, keep=False)]
     if not duplicated.empty:
@@ -322,7 +359,7 @@ def _deduplicate_rows(
                 dataset_ids[0],
             )
 
-    deduped = ranked.drop_duplicates(subset=subset_cols, keep="first").drop(columns=["priority"])
+    deduped = cast(pd.DataFrame, ranked.drop_duplicates(subset=subset_cols, keep="first").drop(columns=["priority"]))
     return deduped
 
 
@@ -341,17 +378,32 @@ def _build_continuous_hourly_frame(
         result_frames: list[pd.DataFrame] = []
         for keys, group in frame.groupby(group_cols, sort=False):
             indexed = group.set_index("observed_at").sort_index()
-            range_start = pd.Timestamp(start_at).floor("h") if start_at is not None else indexed.index.min().floor("h")
-            local_end = pd.Timestamp(end_at).floor("h") if end_at is not None else indexed.index.max().floor("h")
+            index = cast(pd.DatetimeIndex, indexed.index)
+            range_start = (
+                pd.Timestamp(start_at).floor("h")
+                if start_at is not None
+                else pd.Timestamp(cast(Any, index.min())).floor("h")
+            )
+            local_end = (
+                pd.Timestamp(end_at).floor("h")
+                if end_at is not None
+                else pd.Timestamp(cast(Any, index.max())).floor("h")
+            )
             full_index = pd.date_range(range_start, local_end, freq="h")
             aligned = indexed.reindex(full_index)
             aligned.index.name = "observed_at"
             aligned["rainfall_mm"] = pd.to_numeric(aligned["rainfall_mm"], errors="coerce")
-            aligned["quality"] = aligned.get("quality")
-            aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].isna(), "quality"] = "missing"
-            aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].notna(), "quality"] = "normal"
+            rainfall_series = cast(pd.Series, aligned["rainfall_mm"])
+            if "quality" in aligned.columns:
+                quality_series = cast(pd.Series, aligned["quality"])
+                aligned["quality"] = quality_series
+                aligned.loc[quality_series.isna() & rainfall_series.isna(), "quality"] = "missing"
+                aligned.loc[quality_series.isna() & rainfall_series.notna(), "quality"] = "normal"
+            else:
+                aligned["quality"] = "normal"
+                aligned.loc[rainfall_series.isna(), "quality"] = "missing"
             if "overlap_ratio" in indexed.columns:
-                ratio_series = pd.to_numeric(indexed["overlap_ratio"], errors="coerce").dropna()
+                ratio_series = cast(pd.Series, pd.to_numeric(indexed["overlap_ratio"], errors="coerce")).dropna()
                 aligned["overlap_ratio"] = ratio_series.iloc[0] if not ratio_series.empty else float("nan")
             if not isinstance(keys, tuple):
                 keys = (keys,)
@@ -361,15 +413,30 @@ def _build_continuous_hourly_frame(
         return pd.concat(result_frames, ignore_index=True)
 
     indexed = frame.set_index("observed_at").sort_index()
-    range_start = pd.Timestamp(start_at).floor("h") if start_at is not None else indexed.index.min().floor("h")
-    range_end = pd.Timestamp(end_at).floor("h") if end_at is not None else indexed.index.max().floor("h")
+    index = cast(pd.DatetimeIndex, indexed.index)
+    range_start = (
+        pd.Timestamp(start_at).floor("h")
+        if start_at is not None
+        else pd.Timestamp(cast(Any, index.min())).floor("h")
+    )
+    range_end = (
+        pd.Timestamp(end_at).floor("h")
+        if end_at is not None
+        else pd.Timestamp(cast(Any, index.max())).floor("h")
+    )
     full_index = pd.date_range(range_start, range_end, freq="h")
     aligned = indexed.reindex(full_index)
     aligned.index.name = "observed_at"
     aligned["rainfall_mm"] = pd.to_numeric(aligned["rainfall_mm"], errors="coerce")
-    aligned["quality"] = aligned.get("quality")
-    aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].isna(), "quality"] = "missing"
-    aligned.loc[aligned["quality"].isna() & aligned["rainfall_mm"].notna(), "quality"] = "normal"
+    rainfall_series = cast(pd.Series, aligned["rainfall_mm"])
+    if "quality" in aligned.columns:
+        quality_series = cast(pd.Series, aligned["quality"])
+        aligned["quality"] = quality_series
+        aligned.loc[quality_series.isna() & rainfall_series.isna(), "quality"] = "missing"
+        aligned.loc[quality_series.isna() & rainfall_series.notna(), "quality"] = "normal"
+    else:
+        aligned["quality"] = "normal"
+        aligned.loc[rainfall_series.isna(), "quality"] = "missing"
     return aligned.reset_index()
 
 
@@ -405,7 +472,7 @@ def _fetch_polygon_frames(
     placeholders = ",".join("?" for _ in dataset_ids)
     return pd.read_sql_query(
         f"""
-        SELECT c.dataset_id, c.observed_at, c.row, c.col, c.rainfall_mm, c.quality, pcm.overlap_ratio
+        SELECT c.dataset_id, c.observed_at, c.row, c.col, c.rainfall_mm, pcm.overlap_ratio
         FROM cell_timeseries c
         JOIN polygon_cell_map pcm
           ON pcm.dataset_id = c.dataset_id AND pcm.row = c.row AND pcm.col = c.col
@@ -417,12 +484,12 @@ def _fetch_polygon_frames(
         ORDER BY c.observed_at, c.row, c.col
         """,
         conn,
-        params=(
+        params=[
             *dataset_ids,
             polygon_name,
             calc_start.isoformat(timespec="seconds"),
             view_end.isoformat(timespec="seconds"),
-        ),
+        ],
     )
 
 
@@ -436,14 +503,14 @@ def _aggregate_polygon_frame(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
     elif mode == "polygon_weighted_sum":
         rainfall = grouped.apply(
             lambda g: (
-                pd.to_numeric(g["rainfall_mm"], errors="coerce")
-                * pd.to_numeric(g["overlap_ratio"], errors="coerce")
+                cast(pd.Series, pd.to_numeric(g["rainfall_mm"], errors="coerce"))
+                * cast(pd.Series, pd.to_numeric(g["overlap_ratio"], errors="coerce"))
             ).sum(min_count=1)
         )
     elif mode == "polygon_weighted_mean":
         def _weighted_mean(group: pd.DataFrame):
-            values = pd.to_numeric(group["rainfall_mm"], errors="coerce")
-            weights = pd.to_numeric(group["overlap_ratio"], errors="coerce")
+            values = cast(pd.Series, pd.to_numeric(group["rainfall_mm"], errors="coerce"))
+            weights = cast(pd.Series, pd.to_numeric(group["overlap_ratio"], errors="coerce"))
             valid = values.notna() & weights.notna()
             if not bool(valid.any()):
                 return float("nan")
@@ -453,12 +520,14 @@ def _aggregate_polygon_frame(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
     else:
         raise ValueError(f"未対応の集計モードです: {mode}")
 
-    quality = grouped["rainfall_mm"].agg(lambda s: "missing" if s.notna().sum() == 0 else "normal")
+    quality = grouped["rainfall_mm"].agg(
+        lambda s: "missing" if cast(pd.Series, s).notna().sum() == 0 else "normal"
+    )
     result = pd.DataFrame(
         {
-            "observed_at": rainfall.index,
-            "rainfall_mm": rainfall.to_numpy(),
-            "quality": quality.to_numpy(),
+            "observed_at": cast(pd.Series, rainfall).index,
+            "rainfall_mm": cast(pd.Series, rainfall).to_numpy(),
+            "quality": cast(pd.Series, quality).to_numpy(),
         }
     )
     return result.reset_index(drop=True)
@@ -482,7 +551,14 @@ def generate_metric_event_charts(
     calc_start = view_start - timedelta(hours=48)
     with open_db(db_path) as conn:
         if series_mode == "cell":
-            resolved_row, resolved_col, resolved_local_row, resolved_local_col, anchor_x, anchor_y = _resolve_anchor_cell(
+            (
+                resolved_row,
+                resolved_col,
+                resolved_local_row,
+                resolved_local_col,
+                anchor_x,
+                anchor_y,
+            ) = _resolve_anchor_cell(
                 conn=conn,
                 dataset_id=dataset_id,
                 polygon_name=polygon_name,
@@ -525,10 +601,15 @@ def generate_metric_event_charts(
                 dataset_id=dataset_id if dataset_id is not None else None,
                 polygon_name=polygon_name,
             )
-            compatible_dataset_ids = (
-                [dataset_id] if dataset_id is not None else sorted(candidate_cells["dataset_id"].drop_duplicates().tolist())
+            compatible_dataset_ids = [dataset_id] if dataset_id is not None else sorted(
+                candidate_cells["dataset_id"].drop_duplicates().tolist()
             )
-            LOGGER.info("流域集計を実行します: polygon=%s 候補セル数=%s mode=%s", polygon_name, len(candidate_cells), series_mode)
+            LOGGER.info(
+                "流域集計を実行します: polygon=%s 候補セル数=%s mode=%s",
+                polygon_name,
+                len(candidate_cells),
+                series_mode,
+            )
             frame = _fetch_polygon_frames(
                 conn=conn,
                 dataset_ids=compatible_dataset_ids,

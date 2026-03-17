@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import tkinter as tk
 from dataclasses import dataclass, field
 from typing import Any
-import tkinter as tk
 
 import pandas as pd
 
 from ..settings_store import load_settings
-
 
 SERIES_MODE_LABELS = {
     "cell": "セル",
@@ -69,7 +68,9 @@ class GuiState:
         self.view_start_var = tk.StringVar(value=str(cached.get("view_start", "")))
         self.view_end_var = tk.StringVar(value=str(cached.get("view_end", "")))
         self.out_dir_var = tk.StringVar(value=str(cached.get("out_dir", "")))
-        self.spatial_timestamp_var = tk.StringVar(value=str(cached.get("spatial_timestamp", cached.get("view_start", ""))))
+        self.spatial_timestamp_var = tk.StringVar(
+            value=str(cached.get("spatial_timestamp", cached.get("view_start", "")))
+        )
         self.spatial_metric_var = tk.StringVar(
             value=SPATIAL_METRIC_LABELS.get(str(cached.get("spatial_metric", "1h")), "1時間雨量")
         )
@@ -78,7 +79,9 @@ class GuiState:
         self.current_summary: dict[str, Any] = {}
         start_year, start_month, start_day, start_time = _split_timestamp_parts(cached.get("view_start"))
         end_year, end_month, end_day, end_time = _split_timestamp_parts(cached.get("view_end"))
-        spatial_year, spatial_month, spatial_day, spatial_time = _split_timestamp_parts(cached.get("spatial_timestamp", cached.get("view_start")))
+        spatial_year, spatial_month, spatial_day, spatial_time = _split_timestamp_parts(
+            cached.get("spatial_timestamp", cached.get("view_start"))
+        )
         self.view_start_year_var = tk.StringVar(value=start_year)
         self.view_start_month_var = tk.StringVar(value=start_month)
         self.view_start_day_var = tk.StringVar(value=start_day)

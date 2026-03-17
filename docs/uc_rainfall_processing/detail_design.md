@@ -22,7 +22,7 @@
 - `BBox -> ポリゴン内判定` による候補セル抽出
 - SQLite への保存
 - CLI による候補セル一覧表示
-- `row/col` 指定によるセル選択
+- `local_row/local_col` 指定によるセル選択
 - 流域内全セルの合計時系列生成
 - 流域内全セルの平均時系列生成
 - 表示期間指定
@@ -404,8 +404,6 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 表示項目:
 
 - `polygon_name`
-- `row`
-- `col`
 - `polygon_local_row`
 - `polygon_local_col`
 - `x_center`
@@ -416,8 +414,8 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 出力順:
 
 - `polygon_name`
-- `row`
-- `col`
+- `polygon_local_row`
+- `polygon_local_col`
 
 将来拡張:
 
@@ -536,13 +534,13 @@ CREATE INDEX idx_polygon_cell_map_dataset_polygon
 ファイル名第一候補:
 
 ```text
-{dataset_id}_{polygon_name}_r{row}_c{col}_{metric}_{event_time_jst}.png
+{dataset_id}_{polygon_name}_lr{local_row}_lc{local_col}_{metric}_{event_time_jst}.png
 ```
 
 例:
 
 ```text
-rain126675021_東除川流域_r12_c34_24h_20250101T030000JST.png
+rain126675021_東除川流域_lr12_lc34_24h_20250101T030000JST.png
 ```
 
 流域集計例:

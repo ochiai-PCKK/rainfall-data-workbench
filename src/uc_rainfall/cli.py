@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,46 @@ def _parse_datetime(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
 
 
+def _parse_yyyymmdd(value: str) -> datetime:
+    """`YYYYMMDD` 形式の日付文字列を解釈する。"""
+    return datetime.strptime(value, "%Y%m%d")
+
+
+def _extract_head_date(name: str) -> str | None:
+    """ファイル名先頭の日付8桁を返す。見つからない場合は `None`。"""
+    match = re.match(r"^(\d{8})", name)
+    return match.group(1) if match else None
+
+
+def _collect_zip_paths(
+    *,
+    zipdir: str,
+    from_date: str | None,
+    to_date: str | None,
+) -> list[str]:
+    """ZIP ディレクトリから対象ファイル一覧を収集する。"""
+    base = Path(zipdir)
+    if not base.exists():
+        raise FileNotFoundError(f"ZIPディレクトリが見つかりません: {zipdir}")
+    if not base.is_dir():
+        raise NotADirectoryError(f"ZIPディレクトリではありません: {zipdir}")
+
+    from_key = _parse_yyyymmdd(from_date).strftime("%Y%m%d") if from_date else None
+    to_key = _parse_yyyymmdd(to_date).strftime("%Y%m%d") if to_date else None
+
+    paths: list[str] = []
+    for path in sorted(base.glob("*.zip"), key=lambda p: p.name):
+        date_key = _extract_head_date(path.name)
+        if date_key is None:
+            continue
+        if from_key is not None and date_key < from_key:
+            continue
+        if to_key is not None and date_key > to_key:
+            continue
+        paths.append(str(path))
+    return paths
+
+
 def build_parser() -> argparse.ArgumentParser:
     """UC 降雨処理 CLI の引数定義を構築する。"""
     cached = load_settings()
@@ -36,8 +77,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-dir",
         dest="input_paths",
         action="append",
-        required=True,
         help="展開済みディレクトリまたは ZIP ファイルのパス。複数指定可",
+    )
+    p_ingest.add_argument(
+        "--input-zipdir",
+        help="ZIP ファイル群を格納したディレクトリ。--input-path とは排他",
+    )
+    p_ingest.add_argument(
+        "--from-date",
+        help="ZIP ファイル名先頭8桁の日付で下限を指定する（YYYYMMDD）",
+    )
+    p_ingest.add_argument(
+        "--to-date",
+        help="ZIP ファイル名先頭8桁の日付で上限を指定する（YYYYMMDD）",
+    )
+    p_ingest.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="取り込みはせず、対象ZIPのみ表示する",
     )
     p_ingest.add_argument(
         "--polygon-dir",
@@ -99,27 +156,50 @@ def main() -> None:
 
     if args.command == "ingest":
         args.db_path = _require_value(parser, args.db_path, "--db-path")
-        if len(args.input_paths) == 1:
+        input_paths: list[str | Path] = [Path(path) for path in (args.input_paths or [])]
+        if args.input_zipdir and input_paths:
+            parser.error("--input-zipdir と --input-path は同時に指定できません。")
+        if args.input_zipdir:
+            input_paths = [
+                Path(path)
+                for path in _collect_zip_paths(
+                zipdir=args.input_zipdir,
+                from_date=args.from_date,
+                to_date=args.to_date,
+                )
+            ]
+        if not input_paths:
+            parser.error("取り込み対象がありません。--input-path または --input-zipdir を指定してください。")
+
+        if args.dry_run:
+            for input_path in input_paths:
+                print(input_path)
+            return
+
+        if len(input_paths) == 1:
             ingest_uc_rainfall(
                 db_path=args.db_path,
-                input_path=args.input_paths[0],
+                input_path=input_paths[0],
                 polygon_dir=args.polygon_dir,
                 dataset_id=args.dataset_id,
                 grid_crs=args.grid_crs,
             )
         else:
             if args.dataset_id:
-                parser.error("複数入力のときは --dataset-id を指定できません。各入力から自動で dataset_id を決定します。")
+                parser.error(
+                    "複数入力のときは --dataset-id を指定できません。"
+                    "各入力から自動で dataset_id を決定します。"
+                )
             ingest_uc_rainfall_many(
                 db_path=args.db_path,
-                input_paths=args.input_paths,
+                input_paths=input_paths,
                 polygon_dir=args.polygon_dir,
                 grid_crs=args.grid_crs,
             )
         update_settings(
             db_path=args.db_path,
             polygon_dir=args.polygon_dir,
-            input_paths=args.input_paths,
+            input_paths=[str(path) for path in input_paths],
         )
         print(Path(args.db_path))
         return
