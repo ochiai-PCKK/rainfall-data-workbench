@@ -106,7 +106,7 @@ def launch_style_tuner(
     profile = load_style_profile(profile_path) if profile_path else default_style_profile()
 
     root = tk.Tk()
-    root.title("UC Rainfall グラフ体裁チューナー")
+    root.title("UC Rainfall グラフスタイル調整")
     root.geometry("1360x860")
     root.minsize(1180, 760)
 

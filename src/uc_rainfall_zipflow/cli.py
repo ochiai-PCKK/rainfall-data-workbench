@@ -11,7 +11,8 @@ from .models import RunConfig
 from .style_tuner_gui import launch_style_tuner
 
 _AVAILABLE_REGIONS = ("nishiyoke", "higashiyoke", "nishiyoke_higashiyoke", "yamatogawa")
-_AVAILABLE_OUTPUTS = ("raster", "raster_bbox", "plots", "plots_ref", "timeseries_csv")
+_AVAILABLE_OUTPUTS = ("raster", "raster_bbox", "plots", "plots_ref", "analysis_csv", "timeseries_csv")
+_AVAILABLE_OUTPUTS_DISPLAY = ("raster", "raster_bbox", "plots", "plots_ref", "analysis_csv")
 _AVAILABLE_GRAPH_SPANS = ("3d", "5d")
 _AVAILABLE_REF_GRAPH_KINDS = ("sum", "mean")
 
@@ -38,6 +39,15 @@ def _parse_csv_choices(*, raw: str, available: tuple[str, ...], option_name: str
         if item not in deduped:
             deduped.append(item)
     return tuple(deduped)
+
+
+def _normalize_outputs(outputs: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for item in outputs:
+        mapped = "timeseries_csv" if item == "analysis_csv" else item
+        if mapped not in normalized:
+            normalized.append(mapped)
+    return tuple(normalized)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,11 +84,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--outputs",
-        default="raster,raster_bbox,plots",
-        help=f"出力種別のカンマ区切り ({', '.join(_AVAILABLE_OUTPUTS)})",
+        default="raster,raster_bbox,plots_ref",
+        help=(
+            f"出力種別のカンマ区切り ({', '.join(_AVAILABLE_OUTPUTS_DISPLAY)}) "
+            "※timeseries_csv も互換指定可"
+        ),
     )
 
-    style_gui = sub.add_parser("style-gui", help="グラフ体裁チューナーを起動する")
+    style_gui = sub.add_parser("style-gui", help="グラフスタイル調整を起動する")
     style_gui.add_argument("--input-csv", help="*_timeseries.csv のパス（未指定時はサンプル表示）")
     style_gui.add_argument("--sample-mode", choices=("synthetic",), default="synthetic")
     style_gui.add_argument("--value-kind", choices=("sum", "mean"), default="mean")
@@ -108,6 +121,7 @@ def main() -> None:
     try:
         regions = _parse_csv_choices(raw=args.regions, available=_AVAILABLE_REGIONS, option_name="--regions")
         outputs = _parse_csv_choices(raw=args.outputs, available=_AVAILABLE_OUTPUTS, option_name="--outputs")
+        outputs = _normalize_outputs(outputs)
         graph_spans = _parse_csv_choices(
             raw=args.graph_spans,
             available=_AVAILABLE_GRAPH_SPANS,

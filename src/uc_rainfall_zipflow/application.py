@@ -62,7 +62,7 @@ def _prepare_outputs(config: RunConfig) -> tuple[Path, Path, Path, Path, Path, P
     raster_bbox_dir = base_dir / "raster_bbox"
     plot_dir = base_dir / "plots"
     plot_ref_dir = base_dir / "plots_reference"
-    csv_dir = base_dir / "timeseries_csv"
+    csv_dir = base_dir / "analysis_csv"
     log_dir = base_dir / "logs"
     if "raster" in config.output_kinds:
         raster_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +104,7 @@ def _write_timeseries_csv_readme(
 ) -> Path:
     readme_path = csv_dir / "README_ja.txt"
     text = (
-        "UC Rainfall ZIP Flow - timeseries_csv 説明\n"
+        "UC Rainfall ZIP Flow - analysis_csv 説明\n"
         "\n"
         f"基準日: {base_date:%Y-%m-%d}\n"
         f"対象流域: {', '.join(region_keys)}\n"
@@ -503,6 +503,7 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
         "raster_bbox_dir": str(raster_bbox_dir) if "raster_bbox" in config.output_kinds else None,
         "plot_dir": str(plot_dir) if "plots" in config.output_kinds else None,
         "plot_ref_dir": str(plot_ref_dir) if "plots_ref" in config.output_kinds else None,
+        "analysis_csv_dir": str(csv_dir) if "timeseries_csv" in config.output_kinds else None,
         "timeseries_csv_dir": str(csv_dir) if "timeseries_csv" in config.output_kinds else None,
         "log_path": str(log_path) if config.enable_log else None,
         "zip_count": len(selected),

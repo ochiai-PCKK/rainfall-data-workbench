@@ -1,4 +1,4 @@
-# UC Rainfall ZIP Flow グラフ体裁チューナー 要件定義
+# UC Rainfall ZIP Flow グラフスタイル調整 要件定義
 
 ## 1. 目的
 
