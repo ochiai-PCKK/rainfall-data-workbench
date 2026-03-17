@@ -14,6 +14,15 @@ class RunConfig:
     output_root: Path
     polygon_dir: Path
     enable_log: bool
+    export_svg: bool
+    window_mode: str
+    days_before: int
+    days_after: int
+    start_date: date | None
+    end_date: date | None
+    graph_spans: tuple[str, ...]
+    ref_graph_kinds: tuple[str, ...]
+    style_profile_path: Path | None
     region_keys: tuple[str, ...]
     output_kinds: tuple[str, ...]
 

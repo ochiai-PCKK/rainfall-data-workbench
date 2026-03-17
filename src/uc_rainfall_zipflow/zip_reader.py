@@ -77,7 +77,7 @@ def _signature_distance(
 
 
 def resolve_slot_rasters(*, slots: list[TimeSlot], raster_index: dict[datetime, list[Path]]) -> list[Path]:
-    """120 スロット分の TIFF を順序付きで返す（重複時刻は4326格子差が最小の候補を採用）。"""
+    """指定スロット分の TIFF を順序付きで返す（重複時刻は4326格子差が最小の候補を採用）。"""
     resolved: list[Path] = []
     missing: list[str] = []
     signature_cache: dict[Path, tuple[float, float, float, float, float, float]] = {}
@@ -118,6 +118,6 @@ def resolve_slot_rasters(*, slots: list[TimeSlot], raster_index: dict[datetime, 
         preview = ", ".join(missing[:6])
         suffix = "" if len(missing) <= 6 else f" ... (計{len(missing)}件)"
         raise ValueError(f"必要時刻の TIFF が不足しています: {preview}{suffix}")
-    if len(resolved) != 120:
-        raise ValueError(f"時系列点数が 120 ではありません: {len(resolved)}")
+    if len(resolved) != len(slots):
+        raise ValueError(f"時系列点数が一致しません: expected={len(slots)} actual={len(resolved)}")
     return resolved

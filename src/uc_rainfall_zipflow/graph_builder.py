@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +10,7 @@ import pandas as pd
 from uc_rainfall.graph.chart_renderer import render_metric_chart
 
 from .graph_renderer_reference import render_reference_chart
+from .style_profile import GraphStyleProfile
 
 LOGGER = logging.getLogger("uc_rainfall_zipflow")
 
@@ -91,19 +92,78 @@ def render_region_plots(
 
 def render_region_plots_reference(
     *,
-    frame: pd.DataFrame,
+    frame_sum: pd.DataFrame,
+    frame_mean: pd.DataFrame,
     region_key: str,
     region_label: str,
     output_dir: Path,
     base_date: date,
+    graph_spans: tuple[str, ...],
+    ref_graph_kinds: tuple[str, ...],
+    export_svg: bool,
+    style: GraphStyleProfile | None = None,
 ) -> list[Path]:
-    """参考画像寄せスタイルで領域ごとに1枚の全期間グラフを保存する。"""
-    out = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_overview.png"
-    title = f"{region_label} 重み付き合計雨量"
-    render_reference_chart(
-        frame,
-        output_path=out,
-        title=title,
-        badge_date=base_date,
-    )
-    return [out]
+    """参考画像寄せスタイルで領域の合計/平均グラフを保存する。"""
+    saved: list[Path] = []
+    for span in graph_spans:
+        span_days = 3 if span == "3d" else 5
+        frame_sum_span = _extract_span_frame(frame_sum, base_date=base_date, span_days=span_days)
+        frame_mean_span = _extract_span_frame(frame_mean, base_date=base_date, span_days=span_days)
+        start_date = pd.to_datetime(frame_sum_span["observed_at"]).min().strftime("%Y.%m.%d")
+        end_date = pd.to_datetime(frame_sum_span["observed_at"]).max().strftime("%Y.%m.%d")
+
+        out_sum_png = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png"
+        out_mean_png = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
+        title_sum = f"重み付き合計雨量（{start_date} - {end_date}）"
+        title_mean = f"流域平均雨量（{start_date} - {end_date}）"
+
+        if "sum" in ref_graph_kinds:
+            render_reference_chart(
+                frame_sum_span,
+                output_path=out_sum_png,
+                title=title_sum,
+                style=style,
+            )
+            saved.append(out_sum_png)
+        if "mean" in ref_graph_kinds:
+            render_reference_chart(
+                frame_mean_span,
+                output_path=out_mean_png,
+                title=title_mean,
+                style=style,
+            )
+            saved.append(out_mean_png)
+        if export_svg:
+            out_sum_svg = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
+            out_mean_svg = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
+            if "sum" in ref_graph_kinds:
+                render_reference_chart(
+                    frame_sum_span,
+                    output_path=out_sum_svg,
+                    title=title_sum,
+                    style=style,
+                )
+                saved.append(out_sum_svg)
+            if "mean" in ref_graph_kinds:
+                render_reference_chart(
+                    frame_mean_span,
+                    output_path=out_mean_svg,
+                    title=title_mean,
+                    style=style,
+                )
+                saved.append(out_mean_svg)
+    return saved
+
+
+def _extract_span_frame(frame: pd.DataFrame, *, base_date: date, span_days: int) -> pd.DataFrame:
+    hours = span_days * 24
+    center = datetime.combine(base_date, time(hour=0))
+    start = center - timedelta(days=span_days // 2)
+    end = start + timedelta(hours=hours - 1)
+    sub = frame[(frame["observed_at"] >= start) & (frame["observed_at"] <= end)].copy()
+    if len(sub) != hours:
+        raise ValueError(
+            f"{span_days}日グラフ用データが不足しています: expected={hours} actual={len(sub)} "
+            f"range={start:%Y-%m-%d %H:%M}..{end:%Y-%m-%d %H:%M}"
+        )
+    return sub

@@ -31,14 +31,28 @@ from .spatial_clip import (
     transform_geometry,
     validate_region_alignment,
 )
-from .time_series_builder import build_5day_slots
+from .style_profile import load_style_profile
+from .time_series_builder import build_hourly_slots
 from .zip_reader import build_raster_index, extract_target_zips, resolve_slot_rasters
 from .zip_selector import select_target_zips
 
 
-def _window_range(base_date) -> tuple[datetime, datetime]:
-    start = datetime.combine(base_date - timedelta(days=2), time(hour=0))
-    end = datetime.combine(base_date + timedelta(days=2), time(hour=23))
+def _resolve_window_range(config: RunConfig) -> tuple[datetime, datetime]:
+    if config.window_mode == "offset":
+        if config.days_before < 0 or config.days_after < 0:
+            raise ZipFlowError("--days-before/--days-after は 0 以上で指定してください。", exit_code=2)
+        start = datetime.combine(config.base_date - timedelta(days=config.days_before), time(hour=0))
+        end = datetime.combine(config.base_date + timedelta(days=config.days_after), time(hour=23))
+        return start, end
+
+    if config.window_mode != "range":
+        raise ZipFlowError(f"未対応の window_mode です: {config.window_mode}", exit_code=2)
+    if config.start_date is None or config.end_date is None:
+        raise ZipFlowError("window-mode=range では --start-date と --end-date が必須です。", exit_code=2)
+    if config.end_date < config.start_date:
+        raise ZipFlowError("--end-date は --start-date 以降を指定してください。", exit_code=2)
+    start = datetime.combine(config.start_date, time(hour=0))
+    end = datetime.combine(config.end_date, time(hour=23))
     return start, end
 
 
@@ -79,14 +93,23 @@ def _required_coverage_ok(*, selected, window_start: datetime, window_end: datet
     return pointer > window_end
 
 
-def _write_timeseries_csv_readme(*, csv_dir: Path, base_date, region_keys: list[str]) -> Path:
+def _write_timeseries_csv_readme(
+    *,
+    csv_dir: Path,
+    base_date,
+    region_keys: list[str],
+    window_start: datetime,
+    window_end: datetime,
+    slot_count: int,
+) -> Path:
     readme_path = csv_dir / "README_ja.txt"
     text = (
         "UC Rainfall ZIP Flow - timeseries_csv 説明\n"
         "\n"
         f"基準日: {base_date:%Y-%m-%d}\n"
         f"対象流域: {', '.join(region_keys)}\n"
-        "時系列点数: 120 (基準日の前後2日を含む5日間・1時間間隔)\n"
+        f"対象期間: {window_start:%Y-%m-%d %H:%M:%S} 〜 {window_end:%Y-%m-%d %H:%M:%S} (JST)\n"
+        f"時系列点数: {slot_count} (1時間間隔)\n"
         "\n"
         "各CSVの列定義:\n"
         "- observed_at_jst: 観測時刻（JST, YYYY-MM-DD HH:MM:SS）\n"
@@ -94,6 +117,8 @@ def _write_timeseries_csv_readme(*, csv_dir: Path, base_date, region_keys: list[
         "- weighted_sum_mm: 重み付き合計雨量 [mm]\n"
         "- valid_weight: 有効セルの重み合計（欠損除外後）\n"
         "- total_weight: 流域内理論重み合計（欠損除外前）\n"
+        "- valid_cell_count: 有効セル数（重み>0 かつ欠損でないセル）\n"
+        "- total_cell_count: 対象セル数（重み>0 のセル）\n"
         "- coverage_ratio: valid_weight / total_weight\n"
         "- weighted_mean_mm: 重み付き平均雨量 [mm] = weighted_sum_mm / valid_weight\n"
         "\n"
@@ -149,10 +174,17 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
     raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir = _prepare_outputs(config)
     log_path = log_dir / f"{config.base_date:%Y-%m-%d}.log"
     logger = build_logger(enable_file=config.enable_log, log_path=log_path)
+    style_profile = None
+    if "plots_ref" in config.output_kinds:
+        try:
+            style_profile = load_style_profile(config.style_profile_path)
+        except Exception as exc:  # noqa: BLE001
+            raise ZipFlowError(f"スタイルプロファイル読込に失敗しました: {exc}", exit_code=2) from exc
 
-    window_start, window_end = _window_range(config.base_date)
-    slots = build_5day_slots(config.base_date)
-    logger.info("対象期間: %s 〜 %s (120点)", window_start, window_end)
+    window_start, window_end = _resolve_window_range(config)
+    slots = build_hourly_slots(window_start=window_start, window_end=window_end)
+    slot_count = len(slots)
+    logger.info("対象期間: %s 〜 %s (%s点)", window_start, window_end, slot_count)
 
     try:
         selected = select_target_zips(
@@ -190,6 +222,9 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
     enable_timeseries_csv = "timeseries_csv" in config.output_kinds
     enable_weight_calc = enable_any_plot or enable_timeseries_csv
     weighted_series: dict[str, list[float]] = {region.region_key: [] for region in regions} if enable_any_plot else {}
+    weighted_mean_series: dict[str, list[float]] = (
+        {region.region_key: [] for region in regions} if enable_any_plot else {}
+    )
     weighted_rows: dict[str, list[dict[str, object]]] = (
         {region.region_key: [] for region in regions} if enable_timeseries_csv else {}
     )
@@ -209,8 +244,11 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
             raster_index = build_raster_index(extracted)
             slot_rasters = resolve_slot_rasters(slots=slots, raster_index=raster_index)
 
-            if len(slot_rasters) != 120:
-                raise ZipFlowError(f"時系列点数が 120 ではありません: {len(slot_rasters)}", exit_code=5)
+            if len(slot_rasters) != slot_count:
+                raise ZipFlowError(
+                    f"時系列点数が想定と一致しません: expected={slot_count} actual={len(slot_rasters)}",
+                    exit_code=5,
+                )
 
             for slot, raster_path in zip(slots, slot_rasters, strict=True):
                 arr_6674 = None
@@ -244,6 +282,8 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                             )
                         valid_mask = (clipped.data != NODATA_VALUE) & np.isfinite(clipped.data) & (weights > 0.0)
                         valid_weight = float(np.sum(weights[valid_mask]))
+                        valid_cell_count = int(np.count_nonzero(valid_mask))
+                        total_cell_count = int(np.count_nonzero(weights > 0.0))
                         coverage = valid_weight / total_weight
                         if coverage < 0.999:
                             raise ZipFlowError(
@@ -260,10 +300,11 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                                 f"重み付き合計を計算できませんでした: {detail}",
                                 exit_code=5,
                             )
+                        weighted_mean = weighted_value / valid_weight if valid_weight > 0.0 else float("nan")
                         if enable_any_plot:
                             weighted_series[region.region_key].append(weighted_value)
+                            weighted_mean_series[region.region_key].append(weighted_mean)
                         if enable_timeseries_csv:
-                            weighted_mean = weighted_value / valid_weight if valid_weight > 0.0 else float("nan")
                             weighted_rows[region.region_key].append(
                                 {
                                     "observed_at_jst": slot.observed_at_jst.strftime("%Y-%m-%d %H:%M:%S"),
@@ -271,6 +312,8 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                                     "weighted_sum_mm": weighted_value,
                                     "valid_weight": valid_weight,
                                     "total_weight": total_weight,
+                                    "valid_cell_count": valid_cell_count,
+                                    "total_cell_count": total_cell_count,
                                     "coverage_ratio": coverage,
                                     "weighted_mean_mm": weighted_mean,
                                 }
@@ -348,7 +391,7 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
         raise
     except ValueError as exc:
         message = str(exc)
-        if "不足" in message or "120" in message or "時系列" in message:
+        if "不足" in message or "時系列" in message:
             raise ZipFlowError(message, exit_code=5) from exc
         if "transform" in message or "BBox" in message or "CRS" in message:
             raise ZipFlowError(message, exit_code=6) from exc
@@ -358,10 +401,11 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
 
     if "raster_bbox" in config.output_kinds:
         for region in regions:
-            if len(bbox_frames[region.region_key]) != 120:
+            if len(bbox_frames[region.region_key]) != slot_count:
                 count = len(bbox_frames[region.region_key])
                 raise ZipFlowError(
-                    f"領域 {region.region_key} の raster_bbox 点数が 120 ではありません: {count}",
+                    f"領域 {region.region_key} の raster_bbox 点数が想定と不一致です: "
+                    f"expected={slot_count} actual={count}",
                     exit_code=5,
                 )
             write_rain_dat_blocks(
@@ -376,9 +420,10 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
     if enable_timeseries_csv:
         for region in regions:
             rows = weighted_rows[region.region_key]
-            if len(rows) != 120:
+            if len(rows) != slot_count:
                 raise ZipFlowError(
-                    f"領域 {region.region_key} のCSV系列点数が 120 ではありません: {len(rows)}",
+                    f"領域 {region.region_key} のCSV系列点数が想定と不一致です: "
+                    f"expected={slot_count} actual={len(rows)}",
                     exit_code=5,
                 )
             out_csv = csv_dir / region.region_key / f"{region.region_key}_{config.base_date:%Y%m%d}_timeseries.csv"
@@ -392,18 +437,30 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
             csv_dir=csv_dir,
             base_date=config.base_date,
             region_keys=[r.region_key for r in regions],
+            window_start=window_start,
+            window_end=window_end,
+            slot_count=slot_count,
         )
 
     plot_paths: list[Path] = []
     if enable_any_plot:
         for region in regions:
-            series = weighted_series[region.region_key]
-            if len(series) != 120:
+            sum_series = weighted_series[region.region_key]
+            mean_series = weighted_mean_series[region.region_key]
+            if len(sum_series) != slot_count:
                 raise ZipFlowError(
-                    f"領域 {region.region_key} の系列点数が 120 ではありません: {len(series)}",
+                    f"領域 {region.region_key} の系列点数が想定と不一致です: "
+                    f"expected={slot_count} actual={len(sum_series)}",
                     exit_code=5,
                 )
-            frame = build_metric_frame(observed_at=observed_at, weighted_sum=series)
+            if len(mean_series) != slot_count:
+                raise ZipFlowError(
+                    f"領域 {region.region_key} の平均系列点数が想定と不一致です: "
+                    f"expected={slot_count} actual={len(mean_series)}",
+                    exit_code=5,
+                )
+            frame = build_metric_frame(observed_at=observed_at, weighted_sum=sum_series)
+            frame_mean = build_metric_frame(observed_at=observed_at, weighted_sum=mean_series)
             try:
                 peaks = find_metric_peaks(frame)
                 if "plots" in config.output_kinds:
@@ -419,11 +476,16 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                 if "plots_ref" in config.output_kinds:
                     plot_paths.extend(
                         render_region_plots_reference(
-                            frame=frame,
+                            frame_sum=frame,
+                            frame_mean=frame_mean,
                             region_key=region.region_key,
                             region_label=region.region_name,
                             output_dir=plot_ref_dir,
                             base_date=config.base_date,
+                            graph_spans=config.graph_spans,
+                            ref_graph_kinds=config.ref_graph_kinds,
+                            export_svg=config.export_svg,
+                            style=style_profile,
                         )
                     )
             except OSError as exc:

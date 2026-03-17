@@ -55,6 +55,4 @@ def select_target_zips(*, input_zipdir: Path, window_start: datetime, window_end
 
     if not selected:
         raise ValueError("対象期間に重なる ZIP が見つかりません。")
-    if len(selected) > 3:
-        raise ValueError(f"対象 ZIP が 3 件を超えています: {len(selected)} 件")
     return selected

@@ -13,7 +13,6 @@ _YAMATO_NAME = "大和川流域界"
 _REGION_MAP = {
     "nishiyoke": _NISHI_NAME,
     "higashiyoke": _HIGASHI_NAME,
-    "yamatogawa": _YAMATO_NAME,
 }
 
 
@@ -37,7 +36,7 @@ def _load_single(path: Path):
 
 
 def load_region_specs(polygon_dir: str | Path) -> list[RegionSpec]:
-    """4領域（西除川・東除川・結合・大和川）の仕様を返す。"""
+    """領域仕様を返す（西除川・東除川・結合は必須、大和川は任意）。"""
     root = Path(polygon_dir)
     if not root.exists():
         raise FileNotFoundError(f"ポリゴンディレクトリが見つかりません: {root}")
@@ -51,7 +50,7 @@ def load_region_specs(polygon_dir: str | Path) -> list[RegionSpec]:
     merged = nishi.union(higashi)
 
     specs: list[RegionSpec] = []
-    for key in ("nishiyoke", "higashiyoke", "yamatogawa"):
+    for key in ("nishiyoke", "higashiyoke"):
         geom = loaded[key]
         specs.append(
             RegionSpec(
@@ -69,4 +68,19 @@ def load_region_specs(polygon_dir: str | Path) -> list[RegionSpec]:
             bbox_6674=merged.bounds,
         )
     )
+
+    # 大和川は任意。存在する場合のみ追加する。
+    try:
+        yamatogawa_geom = _load_single(_find_polygon_file(root, _YAMATO_NAME))
+    except FileNotFoundError:
+        yamatogawa_geom = None
+    if yamatogawa_geom is not None:
+        specs.append(
+            RegionSpec(
+                region_key="yamatogawa",
+                region_name=_YAMATO_NAME,
+                geometry_6674=yamatogawa_geom,
+                bbox_6674=yamatogawa_geom.bounds,
+            )
+        )
     return specs

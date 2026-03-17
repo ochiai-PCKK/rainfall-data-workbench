@@ -13,3 +13,11 @@ wheels/
 # data
 data
 outputs
+
+# uc_rainfall GUI generated artifacts (project root)
+.uc_rainfall_gui_action_result.json
+.uc_rainfall_gui_context.json
+.uc_rainfall_gui_last_run.json
+.uc_rainfall_gui_log.txt
+.uc_rainfall_gui_widget_tree.json
+.uc_rainfall_gui_last_screenshot.png
