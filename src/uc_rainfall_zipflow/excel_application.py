@@ -191,6 +191,7 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
             export_svg=config.export_svg,
             on_conflict=config.on_conflict,
             style=style_profile,
+            filename_prefix="excel_",
         )
         saved.extend(outputs)
         logger.info("グラフ出力完了: sheet=%s files=%s", sheet_name, len(outputs))

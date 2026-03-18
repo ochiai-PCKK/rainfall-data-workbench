@@ -32,19 +32,24 @@ def build_reference_output_paths(
     graph_spans: tuple[str, ...],
     ref_graph_kinds: tuple[str, ...],
     export_svg: bool,
+    filename_prefix: str = "",
 ) -> list[Path]:
     paths: list[Path] = []
     for region_key in region_keys:
         for span in graph_spans:
             if "sum" in ref_graph_kinds:
-                paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png")
+                paths.append(output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png")
             if "mean" in ref_graph_kinds:
-                paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png")
+                paths.append(output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png")
             if export_svg:
                 if "sum" in ref_graph_kinds:
-                    paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg")
+                    paths.append(
+                        output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
+                    )
                 if "mean" in ref_graph_kinds:
-                    paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg")
+                    paths.append(
+                        output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
+                    )
     return paths
 
 
@@ -149,6 +154,7 @@ def render_region_plots_reference(
     export_svg: bool,
     on_conflict: str = "rename",
     style: GraphStyleProfile | None = None,
+    filename_prefix: str = "",
 ) -> list[Path]:
     """参考画像寄せスタイルで領域の合計/平均グラフを保存する。"""
     saved: list[Path] = []
@@ -159,8 +165,8 @@ def render_region_plots_reference(
         start_date = pd.to_datetime(frame_sum_span["observed_at"]).min().strftime("%Y.%m.%d")
         end_date = pd.to_datetime(frame_sum_span["observed_at"]).max().strftime("%Y.%m.%d")
 
-        out_sum_png = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png"
-        out_mean_png = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
+        out_sum_png = output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png"
+        out_mean_png = output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
         title_sum = f"重み付き合計雨量（{start_date} - {end_date}）"
         title_mean = f"流域平均雨量（{start_date} - {end_date}）"
 
@@ -183,8 +189,8 @@ def render_region_plots_reference(
             )
             saved.append(out_mean_png)
         if export_svg:
-            out_sum_svg = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
-            out_mean_svg = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
+            out_sum_svg = output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
+            out_mean_svg = output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
             if "sum" in ref_graph_kinds:
                 out_sum_svg = _resolve_output_path(out_sum_svg, on_conflict=on_conflict)
                 render_reference_chart(

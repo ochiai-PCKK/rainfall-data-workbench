@@ -919,6 +919,7 @@ class ZipFlowGui:
                     graph_spans=("5d" if config.graph_span == "5d" else "3d",),
                     ref_graph_kinds=config.ref_graph_kinds,
                     export_svg=config.export_svg,
+                    filename_prefix="excel_",
                 )
             )
         conflicts = [p for p in expected if p.exists()]

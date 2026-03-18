@@ -3,14 +3,10 @@
   "input_zipdir": "outputs\\uc_download\\downloads",
   "input_excel": "C:/Users/yuuta.ochiai/Downloads/2010-2025_ティーセン分割_面積・ティーセン係数.xlsx",
   "excel_graph_span": "5d",
-  "excel_selected_sheets": [
-    "2011.11.19"
-  ],
+  "excel_selected_sheets": [],
   "rain_period_input_mode": "manual_range",
   "rain_window_mode": "5d",
-  "rain_selected_dates": [
-    "2010-01-04"
-  ],
+  "rain_selected_dates": [],
   "output_dir": "C:/Users/yuuta.ochiai/Documents/28_jaxa_data/outputs/excel_test",
   "polygon_dir": "data\\大阪狭山市_流域界",
   "period_start": "2010-01-04",

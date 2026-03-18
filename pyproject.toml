@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "28-jaxa-data"
+name = "rainfall_graph_creator"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

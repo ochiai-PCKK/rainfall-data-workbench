@@ -2,8 +2,9 @@
 
 from pathlib import Path
 import tomllib
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(SPECPATH).resolve()
 PYPROJECT_PATH = ROOT_DIR / "pyproject.toml"
 
 project_version = "0.0.0"
@@ -15,13 +16,17 @@ except Exception:
 
 APP_BASE_NAME = "RainfallGraphCreator"
 APP_NAME = f"{APP_BASE_NAME}_v{project_version}"
+RASTERIO_HIDDENIMPORTS = collect_submodules("rasterio")
+if "rasterio.sample" not in RASTERIO_HIDDENIMPORTS:
+    RASTERIO_HIDDENIMPORTS.append("rasterio.sample")
+RASTERIO_DATAS = collect_data_files("rasterio")
 
 a = Analysis(
     ["run_uc_rainfall_gui.py"],
     pathex=[str(ROOT_DIR), str(ROOT_DIR / "src")],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=RASTERIO_DATAS,
+    hiddenimports=RASTERIO_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
