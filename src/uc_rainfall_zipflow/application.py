@@ -61,7 +61,7 @@ def _prepare_outputs(config: RunConfig) -> tuple[Path, Path, Path, Path, Path, P
     raster_dir = base_dir / "raster"
     raster_bbox_dir = base_dir / "raster_bbox"
     plot_dir = base_dir / "plots"
-    plot_ref_dir = base_dir / "plots_reference"
+    plot_ref_dir = config.output_root / "plots_reference"
     csv_dir = base_dir / "analysis_csv"
     log_dir = base_dir / "logs"
     if "raster" in config.output_kinds:
@@ -471,6 +471,7 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                             region_key=region.region_key,
                             region_label=region.region_name,
                             output_dir=plot_dir,
+                            on_conflict=config.on_conflict,
                         )
                     )
                 if "plots_ref" in config.output_kinds:
@@ -485,9 +486,16 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                             graph_spans=config.graph_spans,
                             ref_graph_kinds=config.ref_graph_kinds,
                             export_svg=config.export_svg,
+                            on_conflict=config.on_conflict,
                             style=style_profile,
                         )
                     )
+            except FileExistsError as exc:
+                raise ZipFlowError(
+                    f"既存ファイルと衝突したため中断しました: {exc} "
+                    "(on_conflict=cancel なら期待動作です)",
+                    exit_code=7,
+                ) from exc
             except OSError as exc:
                 raise ZipFlowError(f"グラフ出力に失敗しました: {exc}", exit_code=7) from exc
 

@@ -54,8 +54,9 @@
 ### 6.1 データ出力
 
 - 5日間を単一期間として `tiff` と `asc` を生成する
-- 出力ルートは `outputs/uc_rainfall_zipflow/{base_date}/` とする
-- 出力サブディレクトリは `raster/`, `raster_bbox/`, `plots/`, `logs/` とする
+- 出力ルートは `outputs/uc_rainfall_zipflow/{base_date}/` を基本とする
+- ただし `plots_reference`（`plots_ref` 出力）は `outputs/uc_rainfall_zipflow/plots_reference/` を使用する
+- 出力サブディレクトリは `raster/`, `raster_bbox/`, `plots/`, `logs/` とする（`plots_reference` は別）
 - `raster/` は解析用ディレクトリとし、`tiff` と `asc` を同一階層で管理する
 - `raster_bbox/` は ZIP 展開再現ディレクトリとし、各領域で `rain.dat` と時刻TIFFを管理する
 - 各出力は領域キー単位のサブディレクトリで管理する
@@ -70,6 +71,7 @@
 - `raster_bbox tiff`: `raster_bbox/{region_key}/rain_{region_key}_{YYYYMMDDHH}.tif`
 - `raster_bbox rain.dat`: `raster_bbox/{region_key}/rain.dat`
 - `plot`: `plots/{region_key}/{region_key}_{duration_h}h_{event_YYYYMMDDHH}.png`
+- `plot_ref`: `../plots_reference/{region_key}_{base_YYYYMMDD}_{span}_{sum|mean}_overview.{png|svg}`
 - `log`: `logs/{base_date}.log`（テキスト、ログ出力有効時のみ）
 
 ### 6.2 `asc` 仕様
@@ -87,6 +89,10 @@
 - 指標ごとに最大値を記録した時刻を中心に出力する
 - 同値最大が複数ある場合は先頭時刻を採用し、他候補時刻を `run.log` に出力する
 - グラフ書式は既存処理を参考とする
+- 既存ファイルと衝突した場合は以下のいずれかで処理する
+  - キャンセル（中止）
+  - 上書き
+  - 別名保存（`_v2`, `_v3` の連番）
 
 ## 7. 非機能要件
 

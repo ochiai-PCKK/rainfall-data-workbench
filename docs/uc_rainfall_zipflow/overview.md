@@ -94,5 +94,6 @@
 次に以下を作成する。
 
 - `requirements.md`（ZIP Flow 要件）
+- `requirements_excel_mode.md`（Excelモード要件）
 - `design.md`（モジュール設計）
 - `tasks.md`（実装タスク分解）

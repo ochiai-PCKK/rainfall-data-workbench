@@ -24,6 +24,50 @@ METRIC_WINDOWS = {
 }
 
 
+def build_reference_output_paths(
+    *,
+    output_dir: Path,
+    region_keys: tuple[str, ...],
+    base_date: date,
+    graph_spans: tuple[str, ...],
+    ref_graph_kinds: tuple[str, ...],
+    export_svg: bool,
+) -> list[Path]:
+    paths: list[Path] = []
+    for region_key in region_keys:
+        for span in graph_spans:
+            if "sum" in ref_graph_kinds:
+                paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png")
+            if "mean" in ref_graph_kinds:
+                paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png")
+            if export_svg:
+                if "sum" in ref_graph_kinds:
+                    paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg")
+                if "mean" in ref_graph_kinds:
+                    paths.append(output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg")
+    return paths
+
+
+def _resolve_output_path(path: Path, *, on_conflict: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        return path
+    if on_conflict == "overwrite":
+        return path
+    if on_conflict == "cancel":
+        raise FileExistsError(f"既存ファイルが存在します: {path}")
+    if on_conflict != "rename":
+        raise ValueError(f"未対応の on_conflict です: {on_conflict}")
+    stem = path.stem
+    suffix = path.suffix
+    i = 2
+    while True:
+        candidate = path.with_name(f"{stem}_v{i}{suffix}")
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
 @dataclass(frozen=True)
 class MetricPeak:
     metric: str
@@ -72,12 +116,14 @@ def render_region_plots(
     region_key: str,
     region_label: str,
     output_dir: Path,
+    on_conflict: str = "rename",
 ) -> list[Path]:
     """既存スタイルで領域の指標グラフを保存する。"""
     saved: list[Path] = []
     for peak in peaks:
         stamp = peak.occurred_at.strftime("%Y%m%d%H")
         out = output_dir / region_key / f"{region_key}_{peak.metric}_{stamp}.png"
+        out = _resolve_output_path(out, on_conflict=on_conflict)
         title = f"{region_label} 重み付き合計雨量 {peak.metric} 最大={peak.value:.2f} mm"
         render_metric_chart(
             frame,
@@ -101,6 +147,7 @@ def render_region_plots_reference(
     graph_spans: tuple[str, ...],
     ref_graph_kinds: tuple[str, ...],
     export_svg: bool,
+    on_conflict: str = "rename",
     style: GraphStyleProfile | None = None,
 ) -> list[Path]:
     """参考画像寄せスタイルで領域の合計/平均グラフを保存する。"""
@@ -112,12 +159,13 @@ def render_region_plots_reference(
         start_date = pd.to_datetime(frame_sum_span["observed_at"]).min().strftime("%Y.%m.%d")
         end_date = pd.to_datetime(frame_sum_span["observed_at"]).max().strftime("%Y.%m.%d")
 
-        out_sum_png = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png"
-        out_mean_png = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
+        out_sum_png = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.png"
+        out_mean_png = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
         title_sum = f"重み付き合計雨量（{start_date} - {end_date}）"
         title_mean = f"流域平均雨量（{start_date} - {end_date}）"
 
         if "sum" in ref_graph_kinds:
+            out_sum_png = _resolve_output_path(out_sum_png, on_conflict=on_conflict)
             render_reference_chart(
                 frame_sum_span,
                 output_path=out_sum_png,
@@ -126,6 +174,7 @@ def render_region_plots_reference(
             )
             saved.append(out_sum_png)
         if "mean" in ref_graph_kinds:
+            out_mean_png = _resolve_output_path(out_mean_png, on_conflict=on_conflict)
             render_reference_chart(
                 frame_mean_span,
                 output_path=out_mean_png,
@@ -134,9 +183,10 @@ def render_region_plots_reference(
             )
             saved.append(out_mean_png)
         if export_svg:
-            out_sum_svg = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
-            out_mean_svg = output_dir / region_key / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
+            out_sum_svg = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_sum_overview.svg"
+            out_mean_svg = output_dir / f"{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.svg"
             if "sum" in ref_graph_kinds:
+                out_sum_svg = _resolve_output_path(out_sum_svg, on_conflict=on_conflict)
                 render_reference_chart(
                     frame_sum_span,
                     output_path=out_sum_svg,
@@ -145,6 +195,7 @@ def render_region_plots_reference(
                 )
                 saved.append(out_sum_svg)
             if "mean" in ref_graph_kinds:
+                out_mean_svg = _resolve_output_path(out_mean_svg, on_conflict=on_conflict)
                 render_reference_chart(
                     frame_mean_span,
                     output_path=out_mean_svg,

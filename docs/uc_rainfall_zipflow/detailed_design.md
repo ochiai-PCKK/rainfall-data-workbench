@@ -18,6 +18,7 @@
 - `--regions CSV`（任意、未指定時は全4流域）
 - `--outputs CSV`（任意、未指定時は `raster,raster_bbox,plots`。`plots_ref` も指定可）
 - `--enable-log`（任意）
+- `--on-conflict {rename|overwrite|cancel}`（任意、既定 `rename`）
 
 終了コード:
 
@@ -39,6 +40,7 @@
 - `enable_log: bool`
 - `region_keys: tuple[str, ...]`
 - `output_kinds: tuple[str, ...]`
+- `on_conflict: str`（`rename` / `overwrite` / `cancel`）
 
 ### 3.2 `RegionSpec`
 
@@ -116,12 +118,17 @@
 - ローリング窓内に `-9999` が含まれる時刻は欠損として無効化
 - 指標ごとに最大値と時刻を抽出
 - 同値最大複数時は最初の時刻を採用し、残りはログへ記録
+- 出力先衝突時は `on_conflict` に従う
+  - `cancel`: `FileExistsError` として中断
+  - `overwrite`: 既存ファイルを上書き
+  - `rename`: `_v2`, `_v3` 連番で別名保存
 
 ## 5. ファイル出力詳細
 
 出力ルート:
 
 - `{output_dir}/{base_date}/`
+- `{output_dir}/plots_reference/`（`plots_ref` 専用）
 
 出力先:
 
@@ -130,6 +137,7 @@
 - `raster_bbox/{region_key}/rain_{region_key}_{YYYYMMDDHH}.tif`
 - `raster_bbox/{region_key}/rain.dat`
 - `plots/{region_key}/{region_key}_{duration_h}h_{event_YYYYMMDDHH}.png`
+- `../plots_reference/{region_key}_{base_YYYYMMDD}_{span}_{sum|mean}_overview.{png|svg}`
 - `logs/{base_date}.log`（`--enable-log` の場合のみ）
 
 ## 6. ログ仕様
@@ -175,3 +183,106 @@
 - 異常系: 120点不足で即時失敗
 - 異常系: CRS不一致/変換失敗で即時失敗
 - 品質: 同値最大時の先頭採用ログ確認
+
+## 9. Excelモード詳細設計
+
+### 9.1 入力と候補生成
+
+- 入力は `.xlsx` ファイル1件
+- シート走査時に対象名を抽出
+  - `YYYY.MM.DD`
+  - `【再分割】YYYY.MM.DD`
+- 管理シートは除外
+- 候補はシート名単位で保持し、同一日付でも統合しない
+
+### 9.2 候補選択UI
+
+- Excelモードで候補一覧を表示
+- 複数選択可能
+- グラフ期間は `3日` / `5日` をユーザーが選択
+- 未選択で実行した場合は入力エラー
+
+### 9.3 シート検証
+
+各候補シートについて以下を検証する。
+
+- `B列` が datetime として解釈できる
+- 点数が 120（5日）である
+- 1時間刻みで単調増加している
+- `Q列` 欠損・型不正がない
+
+違反時は候補名と理由を含めてエラー終了する。
+
+### 9.4 グラフ用時系列組立
+
+- 時刻は `B列` を正として利用する
+- 系列値は `Q列`（時間雨量）を利用する
+- 3日グラフ選択時は、120点系列から中央3日相当を抽出して `plot_ref` へ渡す
+- 5日グラフ選択時は120点全体を `plot_ref` へ渡す
+
+### 9.5 出力
+
+- 出力先: `{output_dir}/plots_reference/`
+- 命名: `{region_key}_{base_YYYYMMDD}_{span}_{sum|mean}_overview.{png|svg}`
+- 衝突時は `on_conflict` 適用
+  - `cancel`: 中断
+  - `overwrite`: 上書き
+  - `rename`: `_v2`, `_v3` を付与
+
+### 9.6 スタイル調整
+
+- ExcelモードではCSV指定/自動探索を使わない
+- 選択中イベントの先頭1件をプレビュー実データとして使用
+- 候補未選択時のみテンプレートで起動
+
+## 10. GUI分割詳細設計
+
+### 10.1 ファイル構成
+
+- `src/uc_rainfall_zipflow/gui/app.py`
+- `src/uc_rainfall_zipflow/gui/rain_mode_panel.py`
+- `src/uc_rainfall_zipflow/gui/excel_mode_panel.py`
+- `src/uc_rainfall_zipflow/gui/style_tuner_window.py`
+- `src/uc_rainfall_zipflow/gui/types.py`
+- `src/uc_rainfall_zipflow/style_tuner_core.py`
+
+### 10.2 役割分離
+
+- `app.py`
+  - 共通ウィジェット（ヘッダー、実行、ログ、出力一覧、スタイル調整導線）を保持
+  - モード切替時にパネルを生成・差し替え
+  - 各パネルから受け取った値を `RunConfig` へ変換する
+- `rain_mode_panel.py`
+  - ZIP入力・ポリゴン・流域・出力種別の入力を扱う
+  - 期間チェック（3日/5日）を実施する
+- `excel_mode_panel.py`
+  - Excel入力・候補シート一覧・複数選択・3日/5日選択を扱う
+  - Excelモード固有バリデーション（候補未選択など）を実施する
+- `types.py`
+  - パネル共通の戻り値型（例: `ModePayload`）を定義する
+  - `app.py` がモード差分を if 分岐で扱いやすくする
+- `style_tuner_core.py`
+  - スタイル調整入力の正規化を担当する（CSV読込、テンプレ生成、DataFrame検証）
+  - 期間切り出し（3d/5d）ロジックを提供する
+- `style_tuner_window.py`
+  - チューナーUIを担当する
+  - コアから渡された `DataFrame` を使って描画・調整する
+
+### 10.3 既存移行方針
+
+- 既存 `run_gui.py` のロジックを一括移植しない
+- まず `app.py` に共通骨格を移し、次に `rain_mode_panel.py` を切り出す
+- 最後に `excel_mode_panel.py` を追加し、Excel候補機能を実装する
+- スタイル調整起動処理は `app.py` に残し、入力データ選定だけ各パネルから受ける
+
+### 10.4 スタイル調整I/F
+
+- `StyleTunerInput`（`gui/types.py`）を導入する
+  - `source_kind`: `excel` / `csv` / `template`
+  - `frame`: `pd.DataFrame | None`
+  - `value_kind`: `sum` / `mean`
+  - `preview_span`: `3d` / `5d`
+  - `title_template`: `str`
+- `app.py` は `StyleTunerInput` を構築して `gui/style_tuner_window.py` に渡す
+- `style_tuner_window.py` は CSVパスではなく `frame` 直受けを第一経路とする
+- CSVは後方互換経路として `style_tuner_core.py` の補助関数で扱う

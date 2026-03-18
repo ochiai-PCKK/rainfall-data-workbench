@@ -4,7 +4,7 @@ import tkinter as tk
 from dataclasses import asdict
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -90,6 +90,7 @@ def launch_style_tuner(
     sample_mode: str,
     profile_path: Path | None,
     preview_span: str,
+    master: tk.Misc | None = None,
 ) -> None:
     if input_csv is not None:
         frame = _read_timeseries_csv(input_csv, value_kind=value_kind)
@@ -103,20 +104,59 @@ def launch_style_tuner(
     available_spans: tuple[str, ...] = ("3d", "5d") if len(window_full) >= 120 else ("3d",)
     if preview_span not in available_spans:
         preview_span = available_spans[0]
-    profile = load_style_profile(profile_path) if profile_path else default_style_profile()
+    save_target = profile_path if profile_path else default_style_profile_path()
+    profile = load_style_profile(save_target) if save_target.exists() else default_style_profile()
 
-    root = tk.Tk()
+    owns_mainloop = master is None
+    root: tk.Misc
+    if owns_mainloop:
+        root = tk.Tk()
+    else:
+        root = tk.Toplevel(master)
+        root.transient(master)
     root.title("UC Rainfall グラフスタイル調整")
     root.geometry("1360x860")
     root.minsize(1180, 760)
 
-    left = ttk.Frame(root, padding=8)
-    left.pack(side=tk.LEFT, fill=tk.Y)
-    right = ttk.Frame(root, padding=8)
-    right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    container = ttk.Frame(root, padding=8)
+    container.pack(fill=tk.BOTH, expand=True)
+    container.columnconfigure(0, weight=0)
+    container.columnconfigure(1, weight=1)
+    container.rowconfigure(0, weight=1)
 
-    preview_holder = ttk.Frame(right, width=960, height=700)
-    preview_holder.pack(fill=tk.BOTH, expand=True)
+    settings_panel = ttk.LabelFrame(container, text="設定", padding=6)
+    settings_panel.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+    settings_panel.rowconfigure(0, weight=1)
+    settings_panel.columnconfigure(0, weight=1)
+
+    settings_canvas = tk.Canvas(settings_panel, highlightthickness=0, width=470)
+    settings_canvas.grid(row=0, column=0, sticky="nsew")
+    settings_scroll = ttk.Scrollbar(settings_panel, orient=tk.VERTICAL, command=settings_canvas.yview)
+    settings_scroll.grid(row=0, column=1, sticky="ns")
+    settings_canvas.configure(yscrollcommand=settings_scroll.set)
+    settings_inner = ttk.Frame(settings_canvas, padding=(2, 2))
+    settings_window = settings_canvas.create_window((0, 0), window=settings_inner, anchor="nw")
+
+    def _sync_settings_scroll(_event=None) -> None:
+        settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+        settings_canvas.itemconfigure(settings_window, width=settings_canvas.winfo_width())
+
+    settings_inner.bind("<Configure>", _sync_settings_scroll)
+    settings_canvas.bind("<Configure>", _sync_settings_scroll)
+
+    def _on_mousewheel(event) -> None:
+        settings_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    settings_canvas.bind("<Enter>", lambda _e: settings_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+    settings_canvas.bind("<Leave>", lambda _e: settings_canvas.unbind_all("<MouseWheel>"))
+
+    preview_panel = ttk.LabelFrame(container, text="プレビュー", padding=8)
+    preview_panel.grid(row=0, column=1, sticky="nsew")
+    preview_panel.columnconfigure(0, weight=1)
+    preview_panel.rowconfigure(0, weight=1)
+
+    preview_holder = ttk.Frame(preview_panel, width=960, height=700)
+    preview_holder.grid(row=0, column=0, sticky="nsew")
     preview_holder.pack_propagate(False)
 
     vars_map: dict[str, tk.Variable] = {
@@ -148,7 +188,7 @@ def launch_style_tuner(
         "grid_x_alpha": tk.DoubleVar(value=profile.grid_x_alpha),
     }
 
-    controls: list[tuple[str, str, float, float, float]] = [
+    all_controls: list[tuple[str, str, float, float, float]] = [
         ("fig_width", "幅(inch)", 1.0, 18.0, 0.1),
         ("fig_height", "高さ(inch)", 1.0, 12.0, 0.1),
         ("dpi", "DPI", 72.0, 300.0, 1.0),
@@ -182,6 +222,10 @@ def launch_style_tuner(
     last_holder_size = (0, 0)
     current_span_var = tk.StringVar(value=preview_span)
 
+    def _holder_size_ready() -> bool:
+        preview_holder.update_idletasks()
+        return preview_holder.winfo_width() >= 320 and preview_holder.winfo_height() >= 240
+
     def _resolve_title_for_span(selected_span: str) -> str:
         selected_window = _slice_preview_window(window_full, selected_span)
         start_date = pd.to_datetime(selected_window["observed_at"]).min().strftime("%Y.%m.%d")
@@ -197,8 +241,13 @@ def launch_style_tuner(
 
     def _update_figure_slider_range(dpi_value: int) -> tuple[float, float]:
         preview_holder.update_idletasks()
-        holder_w = max(320, preview_holder.winfo_width() - 16)
-        holder_h = max(240, preview_holder.winfo_height() - 16)
+        holder_w_raw = preview_holder.winfo_width()
+        holder_h_raw = preview_holder.winfo_height()
+        if holder_w_raw < 320 or holder_h_raw < 240:
+            holder_w_raw = max(holder_w_raw, preview_holder.winfo_reqwidth())
+            holder_h_raw = max(holder_h_raw, preview_holder.winfo_reqheight())
+        holder_w = max(320, holder_w_raw - 16)
+        holder_h = max(240, holder_h_raw - 16)
         safe_dpi = max(72, int(dpi_value))
         max_w = max(1.0, round(holder_w / safe_dpi, 1))
         max_h = max(1.0, round(holder_h / safe_dpi, 1))
@@ -210,6 +259,8 @@ def launch_style_tuner(
 
     def _clamp_figure_size(profile_local: GraphStyleProfile) -> GraphStyleProfile:
         nonlocal is_internal_update
+        if not _holder_size_ready():
+            return profile_local
         max_w, max_h = _update_figure_slider_range(profile_local.dpi)
         clamped_w = min(max(profile_local.fig_width, 1.0), max_w)
         clamped_h = min(max(profile_local.fig_height, 1.0), max_h)
@@ -272,43 +323,27 @@ def launch_style_tuner(
         _update_figure_slider_range(vars_map["dpi"].get())
         schedule_redraw()
 
-    def on_save_profile() -> None:
-        base_path = profile_path if profile_path else default_style_profile_path()
-        default_path = str(base_path)
-        out = filedialog.asksaveasfilename(
-            title="スタイルプロファイル保存",
-            defaultextension=".json",
-            initialfile=Path(default_path).name,
-            initialdir=str(Path(default_path).parent),
-            filetypes=[("JSON", "*.json")],
-        )
-        if not out:
-            return
-        save_style_profile(Path(out), _profile_from_vars(vars_map))
-        messagebox.showinfo("保存完了", f"保存しました: {out}")
-
-    def on_load_profile() -> None:
-        selected = filedialog.askopenfilename(
-            title="スタイルプロファイル読込",
-            filetypes=[("JSON", "*.json")],
-        )
-        if not selected:
-            return
-        loaded = load_style_profile(Path(selected))
-        _apply_profile_to_vars(loaded, vars_map)
-        redraw()
+    def on_save_and_close() -> None:
+        save_style_profile(save_target, _profile_from_vars(vars_map))
+        messagebox.showinfo("保存完了", f"保存しました: {save_target}")
+        root.destroy()
 
     def on_reset_default() -> None:
         _apply_profile_to_vars(default_style_profile(), vars_map)
         redraw()
 
-    btn_row = ttk.Frame(left)
-    btn_row.pack(fill=tk.X, pady=(0, 8))
-    ttk.Button(btn_row, text="保存", command=on_save_profile).pack(side=tk.LEFT)
-    ttk.Button(btn_row, text="読込", command=on_load_profile).pack(side=tk.LEFT, padx=4)
-    ttk.Button(btn_row, text="初期化", command=on_reset_default).pack(side=tk.LEFT)
+    info_row = ttk.Frame(settings_inner)
+    info_row.pack(fill=tk.X, pady=(0, 6))
+    source_label = str(input_csv) if input_csv is not None else "テンプレート（疑似データ）"
+    ttk.Label(info_row, text=f"対象データ: {source_label}", wraplength=440).pack(anchor=tk.W)
+    ttk.Label(info_row, text=f"保存先: {save_target}", wraplength=440).pack(anchor=tk.W, pady=(2, 0))
 
-    span_row = ttk.Frame(left)
+    btn_row = ttk.Frame(settings_inner)
+    btn_row.pack(fill=tk.X, pady=(0, 8))
+    ttk.Button(btn_row, text="保存して閉じる", command=on_save_and_close).pack(side=tk.LEFT)
+    ttk.Button(btn_row, text="既定値に戻す", command=on_reset_default).pack(side=tk.LEFT, padx=4)
+
+    span_row = ttk.Frame(settings_inner)
     span_row.pack(fill=tk.X, pady=(0, 8))
     ttk.Label(span_row, text="表示期間", width=14).pack(side=tk.LEFT)
     span_combo = ttk.Combobox(
@@ -321,7 +356,7 @@ def launch_style_tuner(
     span_combo.pack(side=tk.LEFT)
     span_combo.bind("<<ComboboxSelected>>", schedule_redraw)
 
-    grid_row = ttk.Frame(left)
+    grid_row = ttk.Frame(settings_inner)
     grid_row.pack(fill=tk.X)
     ttk.Checkbutton(
         grid_row,
@@ -336,20 +371,20 @@ def launch_style_tuner(
         command=schedule_redraw,
     ).pack(side=tk.LEFT, padx=8)
 
-    color_row_y = ttk.Frame(left)
+    color_row_y = ttk.Frame(settings_inner)
     color_row_y.pack(fill=tk.X, pady=(0, 2))
     ttk.Label(color_row_y, text="横グリッド色", width=14).pack(side=tk.LEFT)
     ttk.Entry(color_row_y, width=12, textvariable=vars_map["grid_y_color"]).pack(side=tk.LEFT)
     vars_map["grid_y_color"].trace_add("write", schedule_redraw)
 
-    color_row_x = ttk.Frame(left)
+    color_row_x = ttk.Frame(settings_inner)
     color_row_x.pack(fill=tk.X, pady=(0, 6))
     ttk.Label(color_row_x, text="縦グリッド色", width=14).pack(side=tk.LEFT)
     ttk.Entry(color_row_x, width=12, textvariable=vars_map["grid_x_color"]).pack(side=tk.LEFT)
     vars_map["grid_x_color"].trace_add("write", schedule_redraw)
 
-    for key, label, vmin, vmax, step in controls:
-        frm = ttk.Frame(left)
+    for key, label, vmin, vmax, step in all_controls:
+        frm = ttk.Frame(settings_inner)
         frm.pack(fill=tk.X, pady=1)
         ttk.Label(frm, text=label, width=14).pack(side=tk.LEFT)
         scale = ttk.Scale(
@@ -367,5 +402,6 @@ def launch_style_tuner(
 
     _update_figure_slider_range(vars_map["dpi"].get())
     preview_holder.bind("<Configure>", on_holder_configure)
-    redraw()
-    root.mainloop()
+    root.after(80, redraw)
+    if owns_mainloop:
+        root.mainloop()

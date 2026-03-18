@@ -26,6 +26,7 @@ uv run python -m uc_rainfall_zipflow.cli run --base-date 2010-07-14 --enable-log
 - `--ref-graph-kinds`: `plots_ref` の出力種別（`sum`, `mean`）
 - `--export-svg`: PNG に加えて SVG も出力
 - `--style-profile`: `plots_ref` に適用するスタイルプロファイル(JSON)
+- `--on-conflict`: 出力衝突時の挙動（`rename` / `overwrite` / `cancel`、既定は `rename`）
 
 例: 西除川+東除川のみ、整形時系列グラフとラスタを出力
 
@@ -48,6 +49,7 @@ uv run python -m uc_rainfall_zipflow.cli run --base-date 2010-07-14 --window-mod
 使い分け:
 - 分析CSVを出力済みの場合: その `*_timeseries.csv` を指定して実データで調整
 - 分析CSVがない場合: `--input-csv` 省略でテンプレート（疑似データ）調整
+- 保存運用: 通常は「既定先へ保存」、必要時のみ「名前を付けて保存」
 
 推奨配置:
 
@@ -70,6 +72,20 @@ uv run python -m uc_rainfall_zipflow.cli style-gui --value-kind mean --sample-mo
 uv run python -m uc_rainfall_zipflow.cli run --base-date 2010-07-14 --outputs plots_ref --ref-graph-kinds mean --style-profile config\uc_rainfall_zipflow\styles\default.json
 ```
 
+## 1.2 実行 GUI（新規）
+
+`run` 相当の実行を GUI で行う場合:
+
+```powershell
+uv run python -m uc_rainfall_zipflow.cli gui
+```
+
+主な仕様:
+- 既存GUIの再利用はせず、`uc_rainfall_zipflow` 専用画面として実装
+- 期間指定は `開始日/終了日`（`YYYY-MM-DD`）で、3日または5日のみ許可
+- 設定キャッシュ: `config/uc_rainfall_zipflow/gui_state.json`
+- 右ペインに実行ログ・生成物サマリ・グラフスタイル調整導線を表示
+
 ## 2. 出力構成
 
 基準日 `2010-07-14` の場合:
@@ -79,8 +95,9 @@ uv run python -m uc_rainfall_zipflow.cli run --base-date 2010-07-14 --outputs pl
 - `outputs/uc_rainfall_zipflow/2010-07-14/raster_bbox/{region_key}/*.tif`
 - `outputs/uc_rainfall_zipflow/2010-07-14/raster_bbox/{region_key}/rain.dat`
 - `outputs/uc_rainfall_zipflow/2010-07-14/plots/{region_key}/*.png`
-- `outputs/uc_rainfall_zipflow/2010-07-14/plots_reference/{region_key}/*.png`
-- `outputs/uc_rainfall_zipflow/2010-07-14/plots_reference/{region_key}/*.svg`（`--export-svg` 時）
+- `outputs/uc_rainfall_zipflow/plots_reference/*_sum_overview.png`
+- `outputs/uc_rainfall_zipflow/plots_reference/*_mean_overview.png`
+- `outputs/uc_rainfall_zipflow/plots_reference/*.svg`（`--export-svg` 時）
 - `outputs/uc_rainfall_zipflow/2010-07-14/analysis_csv/{region_key}/*_timeseries.csv`
 - `outputs/uc_rainfall_zipflow/2010-07-14/analysis_csv/{region_key}/*_cells.csv`
 - `outputs/uc_rainfall_zipflow/2010-07-14/analysis_csv/README_ja.txt`

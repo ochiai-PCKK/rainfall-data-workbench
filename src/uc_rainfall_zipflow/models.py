@@ -25,6 +25,7 @@ class RunConfig:
     style_profile_path: Path | None
     region_keys: tuple[str, ...]
     output_kinds: tuple[str, ...]
+    on_conflict: str = "rename"
 
 
 @dataclass(frozen=True)

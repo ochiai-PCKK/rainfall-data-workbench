@@ -1,0 +1,21 @@
+{
+  "run_mode": "Excelデータ",
+  "input_zipdir": "outputs\\uc_download\\downloads",
+  "input_excel": "",
+  "output_dir": "C:/Users/yuuta.ochiai/Documents/28_jaxa_data/outputs/2010data",
+  "polygon_dir": "data\\大阪狭山市_流域界",
+  "period_start": "2010-07-11",
+  "period_end": "2010-07-15",
+  "selected_regions": [
+    "nishiyoke_higashiyoke"
+  ],
+  "selected_outputs": [
+    "plots_ref",
+    "timeseries_csv"
+  ],
+  "ref_graph_kinds": [
+    "mean"
+  ],
+  "enable_log": false,
+  "export_svg": false
+}
