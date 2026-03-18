@@ -82,8 +82,8 @@ def draw_reference_chart(
     )
     ax2.plot(times, window["cumulative_mm"], color=_LINE_COLOR, linewidth=cfg.line_width, zorder=4)
 
-    ax1.set_ylabel("時刻雨量（mm/hr）", fontsize=cfg.axis_label_fontsize)
-    ax2.set_ylabel("累加雨量（mm）", rotation=270, labelpad=16, fontsize=cfg.axis_label_fontsize)
+    ax1.set_ylabel("時刻雨量（mm/hr）", fontsize=cfg.axis_label_fontsize, labelpad=cfg.y1_label_pad)
+    ax2.set_ylabel("累加雨量（mm）", rotation=270, labelpad=cfg.y2_label_pad, fontsize=cfg.axis_label_fontsize)
     left_max = float(window["rainfall_mm"].max())
     right_max = float(window["cumulative_mm"].max())
     left_top = _ceil_nice(left_max * 1.1, 10.0)
@@ -108,8 +108,8 @@ def draw_reference_chart(
     ax1.set_xlim(xmin, xmax)
 
     ax1.tick_params(axis="x", which="both", labelbottom=False, bottom=False, labelsize=cfg.tick_fontsize)
-    ax1.tick_params(axis="y", which="both", labelsize=cfg.tick_fontsize)
-    ax2.tick_params(axis="y", which="both", labelsize=cfg.tick_fontsize)
+    ax1.tick_params(axis="y", which="both", labelsize=cfg.tick_fontsize, pad=cfg.y_tick_pad)
+    ax2.tick_params(axis="y", which="both", labelsize=cfg.tick_fontsize, pad=cfg.y_tick_pad)
 
     start_day = pd.Timestamp(times.min()).normalize()
     end_day = pd.Timestamp(times.max()).normalize() + pd.Timedelta(days=1)
@@ -178,7 +178,7 @@ def draw_reference_chart(
     for side in ("left", "right", "top", "bottom"):
         ax2.spines[side].set_visible(False)
 
-    ax1.set_title(title, fontsize=cfg.title_fontsize, pad=8)
+    ax1.set_title(title, fontsize=cfg.title_fontsize, pad=cfg.title_pad)
     fig.subplots_adjust(left=cfg.left, right=cfg.right, top=cfg.top, bottom=cfg.bottom, hspace=cfg.hspace)
     return fig
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .application import run_zipflow
 from .errors import ZipFlowError
+from .excel_application import export_excel_event_candidates_csv
 from .gui.app import launch_zipflow_gui, launch_zipflow_gui_with_capture
 from .gui.style_tuner_window import launch_style_tuner
 from .models import RunConfig
@@ -50,6 +51,14 @@ def _normalize_outputs(outputs: tuple[str, ...]) -> tuple[str, ...]:
         if mapped not in normalized:
             normalized.append(mapped)
     return tuple(normalized)
+
+
+def _build_excel_candidates_output_paths(*, input_excel: Path, output_dir: Path) -> tuple[Path, Path]:
+    stem = input_excel.stem
+    return (
+        output_dir / f"{stem}_候補日付リスト.csv",
+        output_dir / f"{stem}_候補日付一覧_unique.csv",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="起動テストを実行してスクリーンショット/JSONを保存後に自動終了する",
     )
+
+    excel_candidates = sub.add_parser(
+        "excel-candidates",
+        help="Excelシート名からイベント候補日付CSVを2点（詳細/重複除去）出力する",
+    )
+    excel_candidates.add_argument("--input-excel", required=True, help="入力Excelファイル(.xlsx/.xls)")
+    excel_candidates.add_argument("--output-dir", default=r"outputs\excel_candidates", help="CSV出力先ディレクトリ")
     return parser
 
 
@@ -155,6 +171,32 @@ def main() -> None:
                 auto_exit_after_capture=bool(args.auto_exit_after_capture),
                 test_mode=False,
             )
+        return
+    if args.command == "excel-candidates":
+        try:
+            input_excel = Path(args.input_excel)
+            output_dir = Path(args.output_dir)
+            output_all_csv, output_unique_csv = _build_excel_candidates_output_paths(
+                input_excel=input_excel,
+                output_dir=output_dir,
+            )
+            result = export_excel_event_candidates_csv(
+                input_excel=input_excel,
+                output_all_csv=output_all_csv,
+                output_unique_csv=output_unique_csv,
+            )
+            print(result["output_all_csv"])
+            print(result["output_unique_csv"])
+            print(
+                f"candidate_count={result['candidate_count']} "
+                f"unique_date_count={result['unique_date_count']}"
+            )
+        except ZipFlowError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            raise SystemExit(exc.exit_code) from exc
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         return
     if args.command != "run":
         parser.error(f"未対応コマンドです: {args.command}")

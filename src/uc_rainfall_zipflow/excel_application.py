@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -34,6 +35,13 @@ class ExcelRunConfig:
     region_label: str = _REGION_LABEL_EXCEL_DEFAULT
 
 
+@dataclass(frozen=True)
+class ExcelEventCandidate:
+    event_date: date
+    sheet_name: str
+    is_resplit: bool
+
+
 def parse_event_sheet_date(sheet_name: str) -> date | None:
     raw = sheet_name.strip()
     if raw.startswith(_RESPLIT_PREFIX):
@@ -44,6 +52,59 @@ def parse_event_sheet_date(sheet_name: str) -> date | None:
         return datetime.strptime(raw, "%Y.%m.%d").date()
     except ValueError:
         return None
+
+
+def collect_excel_event_candidates(input_excel: Path) -> list[ExcelEventCandidate]:
+    if not input_excel.exists():
+        raise ZipFlowError(f"入力Excelファイルが見つかりません: {input_excel}", exit_code=2)
+
+    workbook = load_workbook(input_excel, data_only=True, read_only=True)
+    candidates: list[ExcelEventCandidate] = []
+    for sheet_name in workbook.sheetnames:
+        event_date = parse_event_sheet_date(sheet_name)
+        if event_date is None:
+            continue
+        candidates.append(
+            ExcelEventCandidate(
+                event_date=event_date,
+                sheet_name=sheet_name,
+                is_resplit=sheet_name.startswith(_RESPLIT_PREFIX),
+            )
+        )
+    candidates.sort(key=lambda item: (item.event_date, item.sheet_name))
+    return candidates
+
+
+def export_excel_event_candidates_csv(
+    *,
+    input_excel: Path,
+    output_all_csv: Path,
+    output_unique_csv: Path,
+) -> dict[str, object]:
+    candidates = collect_excel_event_candidates(input_excel)
+    output_all_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_unique_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_all_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["event_date", "sheet_name", "is_resplit"])
+        for item in candidates:
+            writer.writerow([item.event_date.isoformat(), item.sheet_name, str(item.is_resplit).lower()])
+
+    unique_dates = sorted({item.event_date for item in candidates})
+    with output_unique_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["event_date"])
+        for event_date in unique_dates:
+            writer.writerow([event_date.isoformat()])
+
+    return {
+        "input_excel": str(input_excel),
+        "output_all_csv": str(output_all_csv),
+        "output_unique_csv": str(output_unique_csv),
+        "candidate_count": len(candidates),
+        "unique_date_count": len(unique_dates),
+    }
 
 
 def resolve_effective_base_date(base_date: date, graph_span: str) -> date:

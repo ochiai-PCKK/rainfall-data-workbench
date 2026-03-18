@@ -1,10 +1,10 @@
 {
-  "run_mode": "Excelデータ",
+  "run_mode": "解析雨量データ",
   "input_zipdir": "outputs\\uc_download\\downloads",
   "input_excel": "C:/Users/yuuta.ochiai/Downloads/2010-2025_ティーセン分割_面積・ティーセン係数.xlsx",
   "excel_graph_span": "5d",
   "excel_selected_sheets": [],
-  "rain_period_input_mode": "manual_range",
+  "rain_period_input_mode": "auto_dates",
   "rain_window_mode": "5d",
   "rain_selected_dates": [],
   "output_dir": "C:/Users/yuuta.ochiai/Documents/28_jaxa_data/outputs/excel_test",

@@ -19,7 +19,11 @@ class GraphStyleProfile:
     bottom: float = 0.08
     hspace: float = 0.0
     title_fontsize: float = 10.0
+    title_pad: float = 8.0
     axis_label_fontsize: float = 10.0
+    y1_label_pad: float = 6.0
+    y2_label_pad: float = 16.0
+    y_tick_pad: float = 4.0
     tick_fontsize: float = 8.0
     line_width: float = 2.7
     bar_width_hours: float = 0.96
@@ -60,6 +64,11 @@ def _coerce_profile(raw: dict[str, Any]) -> GraphStyleProfile:
     if "grid_alpha" in raw:
         raw.setdefault("grid_y_alpha", raw["grid_alpha"])
         raw.setdefault("grid_x_alpha", raw["grid_alpha"])
+    # 旧キー互換（連動 -> 左右別）
+    if "y_label_pad" in raw:
+        linked = float(raw["y_label_pad"])
+        raw.setdefault("y1_label_pad", linked)
+        raw.setdefault("y2_label_pad", linked)
 
     defaults = asdict(default_style_profile())
     merged: dict[str, Any] = {}

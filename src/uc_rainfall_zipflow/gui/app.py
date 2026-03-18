@@ -334,7 +334,7 @@ class ZipFlowGui:
             input_zip_var=self.input_zipdir_var,
             start_date_var=self.start_date_var,
             end_date_var=self.end_date_var,
-            on_change=lambda: (self._update_rain_period_input_mode(), self._update_graph_span_label()),
+            on_change=self._update_graph_span_label,
         )
         self.excel_panel = ExcelModePanel.create(
             self.mode_input_container,

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import tkinter as tk
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -22,6 +22,12 @@ from .types import StyleTunerInput
 
 _GRID_Y_FIXED_COLOR = "#D0D0D0"
 _GRID_X_FIXED_COLOR = "#9A9A9A"
+
+
+def _decimal_places(step: float) -> int:
+    normalized = Decimal(str(step)).normalize()
+    exponent = normalized.as_tuple().exponent
+    return max(0, -int(exponent))
 
 
 def _profile_from_vars(vars_map: dict[str, tk.Variable]) -> GraphStyleProfile:
@@ -156,7 +162,11 @@ def launch_style_tuner(
         "bottom": tk.DoubleVar(value=profile.bottom),
         "hspace": tk.DoubleVar(value=profile.hspace),
         "title_fontsize": tk.DoubleVar(value=profile.title_fontsize),
+        "title_pad": tk.DoubleVar(value=profile.title_pad),
         "axis_label_fontsize": tk.DoubleVar(value=profile.axis_label_fontsize),
+        "y1_label_pad": tk.DoubleVar(value=profile.y1_label_pad),
+        "y2_label_pad": tk.DoubleVar(value=profile.y2_label_pad),
+        "y_tick_pad": tk.DoubleVar(value=profile.y_tick_pad),
         "tick_fontsize": tk.DoubleVar(value=profile.tick_fontsize),
         "line_width": tk.DoubleVar(value=profile.line_width),
         "bar_width_hours": tk.DoubleVar(value=profile.bar_width_hours),
@@ -184,9 +194,13 @@ def launch_style_tuner(
         ("top", "余白 top", 0.7, 0.98, 0.005),
         ("bottom", "余白 bottom", 0.02, 0.3, 0.005),
         ("hspace", "hspace", 0.0, 0.2, 0.005),
-        ("title_fontsize", "タイトル", 8.0, 24.0, 0.5),
-        ("axis_label_fontsize", "軸ラベル", 8.0, 20.0, 0.5),
-        ("tick_fontsize", "目盛", 6.0, 18.0, 0.5),
+        ("title_fontsize", "タイトル", 4.0, 24.0, 0.5),
+        ("title_pad", "タイトル余白", 0.0, 30.0, 0.5),
+        ("axis_label_fontsize", "軸ラベル", 4.0, 20.0, 0.5),
+        ("y1_label_pad", "左軸ラベル余白", 0.0, 40.0, 0.5),
+        ("y2_label_pad", "右軸ラベル余白", 0.0, 40.0, 0.5),
+        ("y_tick_pad", "左右目盛余白", 0.0, 20.0, 0.5),
+        ("tick_fontsize", "目盛", 3.0, 18.0, 0.5),
         ("line_width", "折れ線幅", 0.5, 6.0, 0.1),
         ("bar_width_hours", "棒幅(時間)", 0.4, 1.2, 0.02),
         ("bar_edge_linewidth", "棒エッジ幅", 0.0, 2.0, 0.05),
@@ -199,15 +213,29 @@ def launch_style_tuner(
         ("grid_x_linewidth", "縦グリッド線幅", 0.1, 2.0, 0.05),
         ("grid_x_alpha", "縦グリッド透過", 0.1, 1.0, 0.05),
     ]
+    control_meta = {
+        key: {
+            "min": vmin,
+            "max": vmax,
+            "step": step,
+            "decimals": _decimal_places(step),
+            "is_int": key == "dpi",
+        }
+        for key, _label, vmin, vmax, step in all_controls
+    }
 
     pending_after_id: str | None = None
+    pending_redraw_requested = False
     current_canvas: FigureCanvasTkAgg | None = None
     current_widget: tk.Widget | None = None
     scale_widgets: dict[str, ttk.Scale] = {}
+    entry_vars: dict[str, tk.StringVar] = {}
+    committed_values: dict[str, float] = {}
     is_internal_update = False
     is_redraw_in_progress = False
     last_holder_size = (0, 0)
     current_span_var = tk.StringVar(value=preview_span)
+    active_scale_drag_key: str | None = None
 
     def _holder_size_ready() -> bool:
         preview_holder.update_idletasks()
@@ -244,6 +272,59 @@ def launch_style_tuner(
             scale_widgets["fig_height"].configure(to=max_h)
         return max_w, max_h
 
+    def _control_max_value(key: str) -> float:
+        if key in ("fig_width", "fig_height") and key in scale_widgets:
+            return float(scale_widgets[key].cget("to"))
+        return float(control_meta[key]["max"])
+
+    def _format_control_value(key: str, value: float) -> str:
+        meta = control_meta[key]
+        if bool(meta["is_int"]):
+            return str(int(round(value)))
+        decimals = int(meta["decimals"])
+        return f"{float(value):.{decimals}f}"
+
+    def _normalize_control_value(key: str, raw_value: object) -> float | None:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        meta = control_meta[key]
+        vmin = float(meta["min"])
+        vmax = _control_max_value(key)
+        value = min(max(value, vmin), vmax)
+        step = float(meta["step"])
+        if step > 0:
+            value = vmin + round((value - vmin) / step) * step
+            value = min(max(value, vmin), vmax)
+        decimals = int(meta["decimals"])
+        if bool(meta["is_int"]):
+            return float(int(round(value)))
+        return float(round(value, decimals))
+
+    def _set_control_value(key: str, value: float, *, update_entry: bool = True) -> None:
+        nonlocal is_internal_update
+        is_internal_update = True
+        meta = control_meta[key]
+        try:
+            if bool(meta["is_int"]):
+                vars_map[key].set(int(round(value)))
+            else:
+                vars_map[key].set(float(value))
+        finally:
+            is_internal_update = False
+        if update_entry and key in entry_vars:
+            entry_vars[key].set(_format_control_value(key, float(vars_map[key].get())))
+
+    def _sync_entry_from_var(key: str) -> None:
+        if key not in entry_vars:
+            return
+        entry_vars[key].set(_format_control_value(key, float(vars_map[key].get())))
+
+    def _sync_all_entry_texts() -> None:
+        for key in control_meta:
+            _sync_entry_from_var(key)
+
     def _clamp_figure_size(profile_local: GraphStyleProfile) -> GraphStyleProfile:
         nonlocal is_internal_update
         if not _holder_size_ready():
@@ -263,41 +344,144 @@ def launch_style_tuner(
         return GraphStyleProfile(**(asdict(profile_local) | {"fig_width": clamped_w, "fig_height": clamped_h}))
 
     def redraw() -> None:
-        nonlocal pending_after_id, current_canvas, current_widget, is_redraw_in_progress
+        nonlocal pending_after_id, pending_redraw_requested, current_canvas, current_widget, is_redraw_in_progress
         if is_redraw_in_progress:
+            pending_redraw_requested = True
             return
         is_redraw_in_progress = True
         pending_after_id = None
         try:
+            focused_before = root.focus_get()
             profile_local = _profile_from_vars(vars_map)
             profile_local = _clamp_figure_size(profile_local)
             selected_span = current_span_var.get()
             selected_window = slice_preview_window(window_full, selected_span)
             current_title = _resolve_title_for_span(selected_span)
-            fig = draw_reference_chart(window=selected_window, title=current_title, style=profile_local, figure=None)
-            new_canvas = FigureCanvasTkAgg(fig, master=preview_holder)
-            new_canvas.draw()
-            new_widget = new_canvas.get_tk_widget()
-            new_widget.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
-            if current_widget is not None:
-                old_fig = current_canvas.figure if current_canvas is not None else None
-                current_widget.destroy()
-                if old_fig is not None:
-                    plt.close(old_fig)
-            current_canvas = new_canvas
-            current_widget = new_widget
+            canvas_width_px = max(1, int(round(profile_local.fig_width * profile_local.dpi)))
+            canvas_height_px = max(1, int(round(profile_local.fig_height * profile_local.dpi)))
+            if current_canvas is None:
+                fig = draw_reference_chart(
+                    window=selected_window,
+                    title=current_title,
+                    style=profile_local,
+                    figure=None,
+                )
+                current_canvas = FigureCanvasTkAgg(fig, master=preview_holder)
+                current_widget = current_canvas.get_tk_widget()
+                current_widget.configure(width=canvas_width_px, height=canvas_height_px)
+                current_widget.place(
+                    relx=0.5,
+                    rely=0.5,
+                    anchor=tk.CENTER,
+                    width=canvas_width_px,
+                    height=canvas_height_px,
+                )
+            else:
+                fig = draw_reference_chart(
+                    window=selected_window,
+                    title=current_title,
+                    style=profile_local,
+                    figure=current_canvas.figure,
+                )
+                assert current_widget is not None
+                current_widget.configure(width=canvas_width_px, height=canvas_height_px)
+                current_widget.place_configure(
+                    relx=0.5,
+                    rely=0.5,
+                    anchor=tk.CENTER,
+                    width=canvas_width_px,
+                    height=canvas_height_px,
+                )
+            current_canvas.draw_idle()
+            if focused_before is not None and focused_before.winfo_exists():
+                if isinstance(focused_before, (ttk.Entry, tk.Entry)):
+                    focused_before.focus_set()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("描画エラー", str(exc))
         finally:
             is_redraw_in_progress = False
+            if pending_redraw_requested:
+                pending_redraw_requested = False
+                pending_after_id = root.after(1, redraw)
 
-    def schedule_redraw(*_args) -> None:
+    def schedule_redraw(*_args, delay_ms: int = 140) -> None:
         nonlocal pending_after_id
-        if is_internal_update or is_redraw_in_progress:
+        if is_internal_update:
             return
         if pending_after_id is not None:
             root.after_cancel(pending_after_id)
-        pending_after_id = root.after(120, redraw)
+        pending_after_id = root.after(delay_ms, redraw)
+
+    def _on_scale_changed(key: str) -> None:
+        if is_internal_update:
+            return
+        if active_scale_drag_key != key:
+            if key in committed_values:
+                _set_control_value(key, committed_values[key], update_entry=True)
+            return
+        if key == "dpi":
+            _update_figure_slider_range(vars_map["dpi"].get())
+            for fig_key in ("fig_width", "fig_height"):
+                normalized = _normalize_control_value(fig_key, vars_map[fig_key].get())
+                if normalized is not None:
+                    _set_control_value(fig_key, normalized, update_entry=True)
+        _sync_entry_from_var(key)
+        # スライダー移動中は値表示のみ更新し、再描画は確定操作時に行う。
+
+    def _on_scale_commit(key: str) -> None:
+        normalized = _normalize_control_value(key, vars_map[key].get())
+        if normalized is not None:
+            _set_control_value(key, normalized, update_entry=True)
+            committed_values[key] = float(vars_map[key].get())
+        if key == "dpi":
+            _update_figure_slider_range(vars_map["dpi"].get())
+            for fig_key in ("fig_width", "fig_height"):
+                fig_normalized = _normalize_control_value(fig_key, vars_map[fig_key].get())
+                if fig_normalized is not None:
+                    _set_control_value(fig_key, fig_normalized, update_entry=True)
+                    committed_values[fig_key] = float(vars_map[fig_key].get())
+        schedule_redraw(delay_ms=0)
+
+    def _on_scale_press(event: tk.Event, key: str):
+        nonlocal active_scale_drag_key
+        widget = event.widget
+        if not isinstance(widget, ttk.Scale):
+            return None
+        element = str(widget.identify(event.x, event.y)).lower()
+        is_slider = "slider" in element
+        if not is_slider:
+            if key in committed_values:
+                _set_control_value(key, committed_values[key], update_entry=True)
+            active_scale_drag_key = None
+            return "break"
+        active_scale_drag_key = key
+        return None
+
+    def _on_scale_release(_event: tk.Event, key: str):
+        nonlocal active_scale_drag_key
+        if active_scale_drag_key != key:
+            if key in committed_values:
+                _set_control_value(key, committed_values[key], update_entry=True)
+            return "break"
+        active_scale_drag_key = None
+        _on_scale_commit(key)
+        return None
+
+    def _on_entry_commit(key: str, _event=None) -> None:
+        normalized = _normalize_control_value(key, entry_vars[key].get().strip())
+        if normalized is None:
+            _sync_entry_from_var(key)
+            return
+        _set_control_value(key, normalized, update_entry=True)
+        committed_values[key] = float(vars_map[key].get())
+        if key == "dpi":
+            _update_figure_slider_range(vars_map["dpi"].get())
+            for fig_key in ("fig_width", "fig_height"):
+                fig_normalized = _normalize_control_value(fig_key, vars_map[fig_key].get())
+                if fig_normalized is not None:
+                    _set_control_value(fig_key, fig_normalized, update_entry=True)
+                    committed_values[fig_key] = float(vars_map[fig_key].get())
+        schedule_redraw(delay_ms=0)
 
     def on_holder_configure(_event: tk.Event) -> None:
         nonlocal last_holder_size
@@ -326,6 +510,7 @@ def launch_style_tuner(
         try:
             loaded = load_style_profile(Path(selected))
             _apply_profile_to_vars(loaded, vars_map)
+            _sync_all_entry_texts()
             redraw()
             messagebox.showinfo("読込完了", f"読み込みました: {selected}")
         except Exception as exc:  # noqa: BLE001
@@ -373,6 +558,7 @@ def launch_style_tuner(
 
     def on_reset_default() -> None:
         _apply_profile_to_vars(default_style_profile(), vars_map)
+        _sync_all_entry_texts()
         redraw()
 
     info_row = ttk.Frame(settings_inner)
@@ -425,14 +611,29 @@ def launch_style_tuner(
         frm = ttk.Frame(settings_inner)
         frm.pack(fill=tk.X, pady=1)
         ttk.Label(frm, text=label, width=14).pack(side=tk.LEFT)
-        scale = ttk.Scale(frm, from_=vmin, to=vmax, variable=vars_map[key], orient=tk.HORIZONTAL)
+        scale = ttk.Scale(
+            frm,
+            from_=vmin,
+            to=vmax,
+            variable=vars_map[key],
+            orient=tk.HORIZONTAL,
+            command=lambda _value, scale_key=key: _on_scale_changed(scale_key),
+        )
         scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scale.bind("<Button-1>", lambda event, scale_key=key: _on_scale_press(event, scale_key))
+        scale.bind("<ButtonRelease-1>", lambda event, scale_key=key: _on_scale_release(event, scale_key))
+        scale.bind("<KeyRelease>", lambda _e, scale_key=key: _on_scale_commit(scale_key))
         scale_widgets[key] = scale
-        entry = ttk.Entry(frm, width=7, textvariable=vars_map[key])
+        entry_var = tk.StringVar(value=_format_control_value(key, float(vars_map[key].get())))
+        entry_vars[key] = entry_var
+        entry = ttk.Entry(frm, width=7, textvariable=entry_var)
         entry.pack(side=tk.LEFT, padx=(4, 0))
-        vars_map[key].trace_add("write", schedule_redraw)
+        entry.bind("<Return>", lambda event, entry_key=key: _on_entry_commit(entry_key, event))
+        entry.bind("<FocusOut>", lambda event, entry_key=key: _on_entry_commit(entry_key, event))
 
     _update_figure_slider_range(vars_map["dpi"].get())
+    _sync_all_entry_texts()
+    committed_values.update({key: float(vars_map[key].get()) for key in control_meta})
     preview_holder.bind("<Configure>", on_holder_configure)
     root.protocol("WM_DELETE_WINDOW", on_attempt_close)
     root.after(80, redraw)
