@@ -6,7 +6,9 @@
   "excel_selected_sheets": [],
   "rain_period_input_mode": "auto_dates",
   "rain_window_mode": "5d",
-  "rain_selected_dates": [],
+  "rain_selected_dates": [
+    "2010-07-20"
+  ],
   "output_dir": "C:/Users/yuuta.ochiai/Documents/28_jaxa_data/outputs/excel_test",
   "polygon_dir": "data\\大阪狭山市_流域界",
   "period_start": "2010-01-04",
