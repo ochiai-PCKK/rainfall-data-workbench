@@ -1,5 +1,7 @@
 # UC Rainfall ZIP Flow 利用手順
 
+GUI利用手順は [usage_gui.md](./usage_gui.md) を参照してください。
+
 ## 1. 実行コマンド
 
 ```powershell
@@ -79,6 +81,17 @@ uv run python -m uc_rainfall_zipflow.cli run --base-date 2010-07-14 --outputs pl
 ```powershell
 uv run python -m uc_rainfall_zipflow.cli gui
 ```
+
+起動テスト（自動終了）:
+
+```powershell
+uv run python -m uc_rainfall_zipflow.cli gui --test-mode
+```
+
+`--test-mode` では、起動後に以下を実行して自動終了する。
+- 必須ウィジェット存在確認
+- GUI全体スクリーンショット保存（`outputs/_gui_test/startup_*.png`）
+- テスト結果JSON保存（`outputs/_gui_test/startup_*.json`）
 
 主な仕様:
 - 既存GUIの再利用はせず、`uc_rainfall_zipflow` 専用画面として実装

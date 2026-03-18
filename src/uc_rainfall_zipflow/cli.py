@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .application import run_zipflow
 from .errors import ZipFlowError
+from .gui.app import launch_zipflow_gui, launch_zipflow_gui_with_capture
+from .gui.style_tuner_window import launch_style_tuner
 from .models import RunConfig
-from .run_gui import launch_zipflow_gui, launch_zipflow_gui_with_capture
-from .style_tuner_gui import launch_style_tuner
 
 _AVAILABLE_REGIONS = ("nishiyoke", "higashiyoke", "nishiyoke_higashiyoke", "yamatogawa")
 _AVAILABLE_OUTPUTS = ("raster", "raster_bbox", "plots", "plots_ref", "analysis_csv", "timeseries_csv")
@@ -118,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="自動スクリーンショット保存後にGUIを終了する",
     )
+    gui.add_argument(
+        "--test-mode",
+        action="store_true",
+        help="起動テストを実行してスクリーンショット/JSONを保存後に自動終了する",
+    )
     return parser
 
 
@@ -136,12 +141,19 @@ def main() -> None:
         )
         return
     if args.command == "gui":
-        if args.auto_capture_seconds is None:
+        if args.test_mode:
+            launch_zipflow_gui_with_capture(
+                auto_capture_seconds=None,
+                auto_exit_after_capture=True,
+                test_mode=True,
+            )
+        elif args.auto_capture_seconds is None:
             launch_zipflow_gui()
         else:
             launch_zipflow_gui_with_capture(
                 auto_capture_seconds=float(args.auto_capture_seconds),
                 auto_exit_after_capture=bool(args.auto_exit_after_capture),
+                test_mode=False,
             )
         return
     if args.command != "run":

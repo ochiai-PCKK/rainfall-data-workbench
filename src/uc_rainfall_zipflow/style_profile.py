@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .runtime_paths import resolve_path
+
 
 @dataclass(frozen=True)
 class GraphStyleProfile:
@@ -41,8 +43,7 @@ def default_style_profile() -> GraphStyleProfile:
 
 
 def default_style_profile_path() -> Path:
-    project_root = Path(__file__).resolve().parents[2]
-    return project_root / "config" / "uc_rainfall_zipflow" / "styles" / "default.json"
+    return resolve_path("config", "uc_rainfall_zipflow", "styles", "default.json")
 
 
 def _coerce_profile(raw: dict[str, Any]) -> GraphStyleProfile:

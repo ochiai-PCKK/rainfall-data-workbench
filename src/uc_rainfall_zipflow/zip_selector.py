@@ -40,18 +40,28 @@ def _resolve_window(path: Path) -> tuple[datetime, datetime]:
     return _parse_from_zip_members(path)
 
 
-def select_target_zips(*, input_zipdir: Path, window_start: datetime, window_end: datetime) -> list[ZipWindow]:
-    """対象期間と重なる ZIP を選定する。"""
+def list_zip_windows(*, input_zipdir: Path) -> list[ZipWindow]:
+    """入力ディレクトリ内のZIPと期間を列挙する。"""
     if not input_zipdir.exists():
         raise FileNotFoundError(f"入力 ZIP ディレクトリが見つかりません: {input_zipdir}")
     if not input_zipdir.is_dir():
         raise NotADirectoryError(f"入力 ZIP ディレクトリではありません: {input_zipdir}")
 
-    selected: list[ZipWindow] = []
+    windows: list[ZipWindow] = []
     for path in sorted(input_zipdir.glob("*.zip"), key=lambda p: p.name):
         start_at, end_at = _resolve_window(path)
+        windows.append(ZipWindow(path=path, start_at=start_at, end_at=end_at))
+    return windows
+
+
+def select_target_zips(*, input_zipdir: Path, window_start: datetime, window_end: datetime) -> list[ZipWindow]:
+    """対象期間と重なる ZIP を選定する。"""
+    windows = list_zip_windows(input_zipdir=input_zipdir)
+    selected: list[ZipWindow] = []
+    for item in windows:
+        start_at, end_at = item.start_at, item.end_at
         if start_at <= window_end and window_start <= end_at:
-            selected.append(ZipWindow(path=path, start_at=start_at, end_at=end_at))
+            selected.append(item)
 
     if not selected:
         raise ValueError("対象期間に重なる ZIP が見つかりません。")
