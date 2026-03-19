@@ -84,7 +84,17 @@ jobs:
       - name: Install Dependencies
         shell: pwsh
         run: |
-          uv sync --locked --group dev
+          $maxAttempts = 3
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              uv sync --locked --group dev
+              break
+            } catch {
+              if ($i -eq $maxAttempts) { throw }
+              Write-Host "uv sync failed (attempt $i/$maxAttempts). Retrying in 10s..."
+              Start-Sleep -Seconds 10
+            }
+          }
 
       - name: Extract Release Notes From CHANGELOG
         shell: pwsh
@@ -94,7 +104,17 @@ jobs:
       - name: Build With PyInstaller Spec
         shell: pwsh
         run: |
-          uv run pyinstaller --noconfirm --clean RainfallGraphCreator.spec
+          $maxAttempts = 2
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              uv run pyinstaller --noconfirm --clean RainfallGraphCreator.spec
+              break
+            } catch {
+              if ($i -eq $maxAttempts) { throw }
+              Write-Host "PyInstaller build failed (attempt $i/$maxAttempts). Retrying in 15s..."
+              Start-Sleep -Seconds 15
+            }
+          }
 
       - name: Archive Dist Output
         id: archive
@@ -111,7 +131,17 @@ jobs:
           if (Test-Path $zipName) {
             Remove-Item $zipName -Force
           }
-          Compress-Archive -Path "dist\*" -DestinationPath $zipName -Force
+          $maxAttempts = 3
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              Compress-Archive -Path "dist\*" -DestinationPath $zipName -Force
+              break
+            } catch {
+              if ($i -eq $maxAttempts) { throw }
+              Write-Host "Compress-Archive failed (attempt $i/$maxAttempts). Retrying in 5s..."
+              Start-Sleep -Seconds 5
+            }
+          }
           "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Create Or Update Release
