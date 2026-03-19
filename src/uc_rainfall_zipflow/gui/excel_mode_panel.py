@@ -123,19 +123,22 @@ class ExcelModePanel:
             self.sheet_count_var.set(f"候補: 0件（読込失敗: {exc}）")
             self._update_selected_count()
             return
-        candidates: list[str] = []
-        for name in wb.sheetnames:
-            if _DATE_SHEET_RE.fullmatch(name):
-                candidates.append(name)
-                continue
-            if name.startswith(_RESPLIT_PREFIX):
-                base = name.replace(_RESPLIT_PREFIX, "", 1)
-                if _DATE_SHEET_RE.fullmatch(base):
+        try:
+            candidates: list[str] = []
+            for name in wb.sheetnames:
+                if _DATE_SHEET_RE.fullmatch(name):
                     candidates.append(name)
-        for item in candidates:
-            self.sheet_listbox.insert(tk.END, item)
-        self.sheet_count_var.set(f"候補: {len(candidates)}件")
-        self._update_selected_count()
+                    continue
+                if name.startswith(_RESPLIT_PREFIX):
+                    base = name.replace(_RESPLIT_PREFIX, "", 1)
+                    if _DATE_SHEET_RE.fullmatch(base):
+                        candidates.append(name)
+            for item in candidates:
+                self.sheet_listbox.insert(tk.END, item)
+            self.sheet_count_var.set(f"候補: {len(candidates)}件")
+            self._update_selected_count()
+        finally:
+            wb.close()
 
     def _update_selected_count(self) -> None:
         self.selected_count_var.set(f"選択中: {len(self.sheet_listbox.curselection())}件")
@@ -166,30 +169,33 @@ class ExcelModePanel:
             return None
         target = selected[0]
         wb = load_workbook(path, data_only=True, read_only=True)
-        if target not in wb.sheetnames:
-            return None
-        ws = wb[target]
-        observed: list[object] = []
-        rainfall: list[object] = []
-        for r in ws.iter_rows(min_row=5, max_col=17, values_only=True):
-            # B列(index=1), Q列(index=16)
-            b = r[1] if len(r) > 1 else None
-            q = r[16] if len(r) > 16 else None
-            if b is None and q is None:
-                continue
-            observed.append(b)
-            rainfall.append(q)
-        frame = pd.DataFrame({"observed_at": pd.to_datetime(observed, errors="coerce"), "rainfall_mm": rainfall})
-        frame = frame.dropna(subset=["observed_at", "rainfall_mm"]).copy()
-        frame["rainfall_mm"] = pd.to_numeric(frame["rainfall_mm"], errors="coerce")
-        frame = frame.dropna(subset=["rainfall_mm"]).sort_values("observed_at").reset_index(drop=True)
-        # Excel入力（01:00〜翌00:00）を本実行と同じ0時起点へ正規化する。
-        frame["observed_at"] = frame["observed_at"] - timedelta(hours=1)
-        span = self.get_preview_span()
-        if span == "3d" and len(frame) >= 72:
-            start_idx = max(0, (len(frame) - 72) // 2)
-            frame = frame.iloc[start_idx : start_idx + 72].copy()
-        elif span == "5d" and len(frame) >= 120:
-            start_idx = max(0, (len(frame) - 120) // 2)
-            frame = frame.iloc[start_idx : start_idx + 120].copy()
-        return frame
+        try:
+            if target not in wb.sheetnames:
+                return None
+            ws = wb[target]
+            observed: list[object] = []
+            rainfall: list[object] = []
+            for r in ws.iter_rows(min_row=5, max_col=17, values_only=True):
+                # B列(index=1), Q列(index=16)
+                b = r[1] if len(r) > 1 else None
+                q = r[16] if len(r) > 16 else None
+                if b is None and q is None:
+                    continue
+                observed.append(b)
+                rainfall.append(q)
+            frame = pd.DataFrame({"observed_at": pd.to_datetime(observed, errors="coerce"), "rainfall_mm": rainfall})
+            frame = frame.dropna(subset=["observed_at", "rainfall_mm"]).copy()
+            frame["rainfall_mm"] = pd.to_numeric(frame["rainfall_mm"], errors="coerce")
+            frame = frame.dropna(subset=["rainfall_mm"]).sort_values("observed_at").reset_index(drop=True)
+            # Excel入力（01:00〜翌00:00）を本実行と同じ0時起点へ正規化する。
+            frame["observed_at"] = frame["observed_at"] - timedelta(hours=1)
+            span = self.get_preview_span()
+            if span == "3d" and len(frame) >= 72:
+                start_idx = max(0, (len(frame) - 72) // 2)
+                frame = frame.iloc[start_idx : start_idx + 72].copy()
+            elif span == "5d" and len(frame) >= 120:
+                start_idx = max(0, (len(frame) - 120) // 2)
+                frame = frame.iloc[start_idx : start_idx + 120].copy()
+            return frame
+        finally:
+            wb.close()

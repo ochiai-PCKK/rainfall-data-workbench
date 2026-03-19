@@ -59,20 +59,23 @@ def collect_excel_event_candidates(input_excel: Path) -> list[ExcelEventCandidat
         raise ZipFlowError(f"入力Excelファイルが見つかりません: {input_excel}", exit_code=2)
 
     workbook = load_workbook(input_excel, data_only=True, read_only=True)
-    candidates: list[ExcelEventCandidate] = []
-    for sheet_name in workbook.sheetnames:
-        event_date = parse_event_sheet_date(sheet_name)
-        if event_date is None:
-            continue
-        candidates.append(
-            ExcelEventCandidate(
-                event_date=event_date,
-                sheet_name=sheet_name,
-                is_resplit=sheet_name.startswith(_RESPLIT_PREFIX),
+    try:
+        candidates: list[ExcelEventCandidate] = []
+        for sheet_name in workbook.sheetnames:
+            event_date = parse_event_sheet_date(sheet_name)
+            if event_date is None:
+                continue
+            candidates.append(
+                ExcelEventCandidate(
+                    event_date=event_date,
+                    sheet_name=sheet_name,
+                    is_resplit=sheet_name.startswith(_RESPLIT_PREFIX),
+                )
             )
-        )
-    candidates.sort(key=lambda item: (item.event_date, item.sheet_name))
-    return candidates
+        candidates.sort(key=lambda item: (item.event_date, item.sheet_name))
+        return candidates
+    finally:
+        workbook.close()
 
 
 def export_excel_event_candidates_csv(
@@ -141,56 +144,59 @@ def _to_float(value: object, *, row_no: int, sheet_name: str) -> float:
 
 def _load_sheet_series(excel_path: Path, *, sheet_name: str, base_date: date) -> pd.DataFrame:
     wb = load_workbook(excel_path, data_only=True, read_only=True)
-    if sheet_name not in wb.sheetnames:
-        raise ZipFlowError(f"指定シートが存在しません: {sheet_name}", exit_code=5)
-    ws = wb[sheet_name]
-    rows: list[dict[str, object]] = []
-    for row_no, values in enumerate(ws.iter_rows(min_row=5, max_col=17, values_only=True), start=5):
-        b = values[1] if len(values) > 1 else None
-        q = values[16] if len(values) > 16 else None
-        if b is None and q is None:
-            continue
-        if b is None or q is None:
+    try:
+        if sheet_name not in wb.sheetnames:
+            raise ZipFlowError(f"指定シートが存在しません: {sheet_name}", exit_code=5)
+        ws = wb[sheet_name]
+        rows: list[dict[str, object]] = []
+        for row_no, values in enumerate(ws.iter_rows(min_row=5, max_col=17, values_only=True), start=5):
+            b = values[1] if len(values) > 1 else None
+            q = values[16] if len(values) > 16 else None
+            if b is None and q is None:
+                continue
+            if b is None or q is None:
+                raise ZipFlowError(
+                    f"Excel時系列に欠損行があります(B/Q片側欠損): sheet={sheet_name} row={row_no}",
+                    exit_code=5,
+                )
+            observed = _to_datetime(b, row_no=row_no, sheet_name=sheet_name)
+            rainfall = _to_float(q, row_no=row_no, sheet_name=sheet_name)
+            rows.append({"observed_at": observed, "rainfall_mm": rainfall})
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            raise ZipFlowError(f"Excel時系列が空です: sheet={sheet_name}", exit_code=5)
+        if len(frame) != 120:
             raise ZipFlowError(
-                f"Excel時系列に欠損行があります(B/Q片側欠損): sheet={sheet_name} row={row_no}",
+                f"Excel時系列点数が120ではありません: sheet={sheet_name} expected=120 actual={len(frame)}",
                 exit_code=5,
             )
-        observed = _to_datetime(b, row_no=row_no, sheet_name=sheet_name)
-        rainfall = _to_float(q, row_no=row_no, sheet_name=sheet_name)
-        rows.append({"observed_at": observed, "rainfall_mm": rainfall})
 
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        raise ZipFlowError(f"Excel時系列が空です: sheet={sheet_name}", exit_code=5)
-    if len(frame) != 120:
-        raise ZipFlowError(
-            f"Excel時系列点数が120ではありません: sheet={sheet_name} expected=120 actual={len(frame)}",
-            exit_code=5,
-        )
+        if frame["observed_at"].duplicated().any():
+            raise ZipFlowError(f"Excel時刻列に重複があります: sheet={sheet_name}", exit_code=5)
+        if not frame["observed_at"].is_monotonic_increasing:
+            raise ZipFlowError(f"Excel時刻列が昇順ではありません: sheet={sheet_name}", exit_code=5)
 
-    if frame["observed_at"].duplicated().any():
-        raise ZipFlowError(f"Excel時刻列に重複があります: sheet={sheet_name}", exit_code=5)
-    if not frame["observed_at"].is_monotonic_increasing:
-        raise ZipFlowError(f"Excel時刻列が昇順ではありません: sheet={sheet_name}", exit_code=5)
+        diffs = frame["observed_at"].diff().dropna()
+        if not diffs.eq(timedelta(hours=1)).all():
+            raise ZipFlowError(f"Excel時刻列が1時間間隔ではありません: sheet={sheet_name}", exit_code=5)
 
-    diffs = frame["observed_at"].diff().dropna()
-    if not diffs.eq(timedelta(hours=1)).all():
-        raise ZipFlowError(f"Excel時刻列が1時間間隔ではありません: sheet={sheet_name}", exit_code=5)
-
-    expected_start = datetime.combine(base_date - timedelta(days=2), time(hour=1))
-    expected_end = datetime.combine(base_date + timedelta(days=3), time(hour=0))
-    actual_start = pd.Timestamp(frame["observed_at"].iloc[0]).to_pydatetime()
-    actual_end = pd.Timestamp(frame["observed_at"].iloc[-1]).to_pydatetime()
-    if actual_start != expected_start or actual_end != expected_end:
-        raise ZipFlowError(
-            "Excel時系列の期間がシート日付と一致しません: "
-            f"sheet={sheet_name} expected={expected_start:%Y-%m-%d %H:%M}..{expected_end:%Y-%m-%d %H:%M} "
-            f"actual={actual_start:%Y-%m-%d %H:%M}..{actual_end:%Y-%m-%d %H:%M}",
-            exit_code=5,
-        )
-    # Excel側の1時間は「01:00〜翌00:00」表記のため、グラフ系は0時起点へ正規化して扱う。
-    frame["observed_at"] = frame["observed_at"] - timedelta(hours=1)
-    return frame
+        expected_start = datetime.combine(base_date - timedelta(days=2), time(hour=1))
+        expected_end = datetime.combine(base_date + timedelta(days=3), time(hour=0))
+        actual_start = pd.Timestamp(frame["observed_at"].iloc[0]).to_pydatetime()
+        actual_end = pd.Timestamp(frame["observed_at"].iloc[-1]).to_pydatetime()
+        if actual_start != expected_start or actual_end != expected_end:
+            raise ZipFlowError(
+                "Excel時系列の期間がシート日付と一致しません: "
+                f"sheet={sheet_name} expected={expected_start:%Y-%m-%d %H:%M}..{expected_end:%Y-%m-%d %H:%M} "
+                f"actual={actual_start:%Y-%m-%d %H:%M}..{actual_end:%Y-%m-%d %H:%M}",
+                exit_code=5,
+            )
+        # Excel側の1時間は「01:00〜翌00:00」表記のため、グラフ系は0時起点へ正規化して扱う。
+        frame["observed_at"] = frame["observed_at"] - timedelta(hours=1)
+        return frame
+    finally:
+        wb.close()
 
 
 def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:

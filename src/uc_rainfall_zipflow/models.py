@@ -3,8 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from shapely.geometry.base import BaseGeometry
+if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry
+else:
+    BaseGeometry = object
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,7 @@ class RunConfig:
     region_keys: tuple[str, ...]
     output_kinds: tuple[str, ...]
     on_conflict: str = "rename"
+    reference_base_date: date | None = None
 
 
 @dataclass(frozen=True)

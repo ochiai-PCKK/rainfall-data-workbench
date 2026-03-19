@@ -187,6 +187,7 @@ def run_zipflow(
     """ZIP Flow 実行本体。"""
     raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir = _prepare_outputs(config)
     log_path = log_dir / f"{config.base_date:%Y-%m-%d}.log"
+    reference_base_date = config.reference_base_date or config.base_date
     logger = build_logger(enable_file=config.enable_log, log_path=log_path)
     style_profile = None
     if "plots_ref" in config.output_kinds:
@@ -552,7 +553,7 @@ def run_zipflow(
                             region_key=region.region_key,
                             region_label=region.region_name,
                             output_dir=plot_ref_dir,
-                            base_date=config.base_date,
+                            base_date=reference_base_date,
                             graph_spans=config.graph_spans,
                             ref_graph_kinds=config.ref_graph_kinds,
                             export_svg=config.export_svg,

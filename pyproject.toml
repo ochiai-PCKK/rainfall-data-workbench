@@ -33,6 +33,7 @@ where = ["src"]
 [dependency-groups]
 dev = [
     "pyinstaller>=6.19.0",
+    "pytest>=8.4.2",
     "pyright>=1.1.408",
     "ruff>=0.15.6",
 ]
@@ -52,3 +53,7 @@ select = [
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 include = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"
+testpaths = ["tests/unit", "tests/integration"]

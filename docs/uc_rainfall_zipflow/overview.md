@@ -96,4 +96,5 @@
 - `requirements.md`（ZIP Flow 要件）
 - `requirements_excel_mode.md`（Excelモード要件）
 - `design.md`（モジュール設計）
+- `test_spec.md`（テスト仕様）
 - `tasks.md`（実装タスク分解）

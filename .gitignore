@@ -21,3 +21,6 @@ outputs
 .uc_rainfall_gui_log.txt
 .uc_rainfall_gui_widget_tree.json
 .uc_rainfall_gui_last_screenshot.png
+.pytest-tmp/
+pytest-cache-files-*/
+.pytest_cache/

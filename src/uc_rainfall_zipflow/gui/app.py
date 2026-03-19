@@ -13,7 +13,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import cast
 
-from ..application import run_zipflow
 from ..errors import ZipFlowError
 from ..excel_application import (
     ExcelRunConfig,
@@ -25,7 +24,6 @@ from ..excel_application import (
 )
 from ..graph_builder import build_reference_output_paths
 from ..models import RunConfig
-from ..regions import load_region_specs
 from ..runtime_paths import resolve_path
 from ..style_profile import default_style_profile_path
 from ..zip_selector import list_zip_windows
@@ -76,6 +74,8 @@ def _resolve_base_date(start_date: date, end_date: date) -> date:
 
 
 def _list_available_region_keys(polygon_dir: Path) -> set[str]:
+    from ..regions import load_region_specs
+
     try:
         specs = load_region_specs(polygon_dir)
     except Exception:
@@ -783,20 +783,25 @@ class ZipFlowGui:
         self.rain_dates_csv_var.set(str(state.get("rain_dates_csv_path", self.rain_dates_csv_var.get())))
         self.rain_dates_excel_var.set(str(state.get("rain_dates_excel_path", self.rain_dates_excel_var.get())))
         self.rain_panel.mark_zipdir_changed()
+        self.rain_panel.refresh_candidates(self.input_zipdir_var.get().strip(), force=False)
         selected_rain_dates = set(cast(list[str], state.get("rain_selected_dates", [])))
         if selected_rain_dates and self.rain_panel.date_listbox.size() > 0:
+            self.rain_panel.date_listbox.selection_clear(0, tk.END)
             for i in range(self.rain_panel.date_listbox.size()):
                 val = self.rain_panel.date_listbox.get(i)
                 if val in selected_rain_dates:
                     self.rain_panel.date_listbox.selection_set(i)
+            self.rain_panel._update_selected_count()
         self.excel_panel.refresh_candidates(self.input_excel_var.get().strip())
         self.excel_panel.span_var.set(str(state.get("excel_graph_span", self.excel_panel.get_span())))
         selected_excel = set(cast(list[str], state.get("excel_selected_sheets", [])))
         if selected_excel:
+            self.excel_panel.sheet_listbox.selection_clear(0, tk.END)
             for i in range(self.excel_panel.sheet_listbox.size()):
                 name = self.excel_panel.sheet_listbox.get(i)
                 if name in selected_excel:
                     self.excel_panel.sheet_listbox.selection_set(i)
+            self.excel_panel._update_selected_count()
         self.output_dir_var.set(str(state.get("output_dir", self.output_dir_var.get())))
         self.polygon_dir_var.set(str(state.get("polygon_dir", self.polygon_dir_var.get())))
         self.start_date_var.set(str(state.get("period_start", self.start_date_var.get())))
@@ -816,6 +821,8 @@ class ZipFlowGui:
         if graph_kinds:
             for key, var in self.graph_kind_vars.items():
                 var.set(key in graph_kinds)
+        self._saved_rain_region_state = {k: bool(v.get()) for k, v in self.region_vars.items()}
+        self._saved_rain_output_state = {k: bool(v.get()) for k, v in self.output_vars.items()}
         self._update_input_mode_visibility()
 
     def _on_import_rain_dates_csv(self) -> None:
@@ -1054,9 +1061,11 @@ class ZipFlowGui:
             configs: list[RunConfig] = []
             for target_date in targets:
                 start_dt, end_dt, _ = self.rain_panel.build_window_for_date(target_date)
+                graph_base_date = resolve_effective_base_date(target_date, window_mode)
                 configs.append(
                     RunConfig(
                         base_date=target_date,
+                        reference_base_date=graph_base_date,
                         input_zipdir=Path(self.input_zipdir_var.get().strip()),
                         output_root=Path(self.output_dir_var.get().strip()),
                         polygon_dir=Path(self.polygon_dir_var.get().strip()),
@@ -1086,6 +1095,7 @@ class ZipFlowGui:
             raise ValueError("期間は 3日 または 5日で指定してください。")
         config = RunConfig(
             base_date=_resolve_base_date(start, end),
+            reference_base_date=None,
             input_zipdir=Path(self.input_zipdir_var.get().strip()),
             output_root=Path(self.output_dir_var.get().strip()),
             polygon_dir=Path(self.polygon_dir_var.get().strip()),
@@ -1179,10 +1189,11 @@ class ZipFlowGui:
     def _resolve_conflict_policy_for_plot_ref(self, config: RunConfig) -> str | None:
         if "plots_ref" not in config.output_kinds:
             return config.on_conflict
+        reference_base_date = config.reference_base_date or config.base_date
         expected = build_reference_output_paths(
             output_dir=config.output_root / "plots_reference",
             region_keys=config.region_keys,
-            base_date=config.base_date,
+            base_date=reference_base_date,
             graph_spans=config.graph_spans,
             ref_graph_kinds=config.ref_graph_kinds,
             export_svg=config.export_svg,
@@ -1215,11 +1226,12 @@ class ZipFlowGui:
         for cfg in configs:
             if "plots_ref" not in cfg.output_kinds:
                 continue
+            reference_base_date = cfg.reference_base_date or cfg.base_date
             expected.extend(
                 build_reference_output_paths(
                     output_dir=cfg.output_root / "plots_reference",
                     region_keys=cfg.region_keys,
-                    base_date=cfg.base_date,
+                    base_date=reference_base_date,
                     graph_spans=cfg.graph_spans,
                     ref_graph_kinds=cfg.ref_graph_kinds,
                     export_svg=cfg.export_svg,
@@ -1382,6 +1394,8 @@ class ZipFlowGui:
                         zip_windows_cache[zip_key] = list_zip_windows(input_zipdir=cfg.input_zipdir)
                     polygon_key = cfg.polygon_dir.resolve()
                     if polygon_key not in regions_cache:
+                        from ..regions import load_region_specs
+
                         regions_cache[polygon_key] = load_region_specs(cfg.polygon_dir)
                 emit_log(
                     f"事前準備: ZIP期間一覧 {len(zip_windows_cache)}件, 流域定義 {len(regions_cache)}件 を共有化"
@@ -1389,6 +1403,8 @@ class ZipFlowGui:
 
                 if len(configs_with_policy) == 1:
                     cfg = configs_with_policy[0]
+                    from ..application import run_zipflow
+
                     emit_log(
                         "処理中: ZIP選定・ラスタ切出し・集計を実行中 "
                         f"({cfg.start_date:%Y-%m-%d}..{cfg.end_date:%Y-%m-%d})"
@@ -1411,6 +1427,8 @@ class ZipFlowGui:
                     last_base_dir = None
                     last_log_path = None
                     total_jobs = len(configs_with_policy)
+                    from ..application import run_zipflow
+
                     for idx, cfg in enumerate(configs_with_policy, start=1):
                         emit_log(
                             f"処理中 [{idx}/{total_jobs}]: "
@@ -1608,7 +1626,12 @@ class ZipFlowGui:
     def _on_open_style_tuner(self) -> None:
         mode = self.run_mode_var.get().strip()
         if mode == "Excelデータ":
-            frame = self.excel_panel.build_preview_frame(self.input_excel_var.get().strip())
+            try:
+                frame = self.excel_panel.build_preview_frame(self.input_excel_var.get().strip())
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("起動エラー", f"Excelプレビューを読み込めませんでした: {exc}")
+                self._append_log(f"[ERROR] グラフスタイル調整のExcelプレビュー読込失敗: {exc}")
+                return
             if frame is None or frame.empty:
                 self._append_log("Excel候補が未選択のためテンプレートでスタイル調整を起動します。")
                 frame = None
