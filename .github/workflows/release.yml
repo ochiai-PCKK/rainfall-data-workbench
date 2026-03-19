@@ -1,0 +1,136 @@
+name: Build And Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (example: v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Tag
+        id: resolve_tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "${{ inputs.tag }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "Tag is empty."
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag format is invalid: $tag. Expected format: vX.Y.Z"
+          }
+          $version = $tag.Substring(1)
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Ensure Tag Exists For Manual Run
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          git rev-parse "refs/tags/${{ steps.resolve_tag.outputs.tag }}" | Out-Null
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate Project Version Against Tag
+        shell: pwsh
+        run: |
+          python -c "import pathlib, tomllib; p=pathlib.Path('pyproject.toml'); d=tomllib.loads(p.read_text(encoding='utf-8')); v=d['project']['version']; e='${{ steps.resolve_tag.outputs.version }}'; assert v==e, f'pyproject version ({v}) does not match tag version ({e})'; print(f'Validated version: {v}')"
+
+      - name: Ensure Spec File Exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "RainfallGraphCreator.spec")) {
+            throw "RainfallGraphCreator.spec not found."
+          }
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          uv sync --locked --group dev
+
+      - name: Extract Release Notes From CHANGELOG
+        shell: pwsh
+        run: |
+          uv run python scripts/release/extract_changelog.py --version "${{ steps.resolve_tag.outputs.version }}" --changelog CHANGELOG.md --output release_notes.md
+
+      - name: Build With PyInstaller Spec
+        shell: pwsh
+        run: |
+          uv run pyinstaller --noconfirm --clean RainfallGraphCreator.spec
+
+      - name: Archive Dist Output
+        id: archive
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist)) {
+            throw "dist directory not found after build."
+          }
+          $items = Get-ChildItem dist -Force
+          if ($items.Count -eq 0) {
+            throw "dist directory is empty."
+          }
+          $zipName = "rainfall-data-workbench-${{ steps.resolve_tag.outputs.version }}-windows.zip"
+          if (Test-Path $zipName) {
+            Remove-Item $zipName -Force
+          }
+          Compress-Archive -Path "dist\*" -DestinationPath $zipName -Force
+          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Create Or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: release_notes.md
+          files: ${{ steps.archive.outputs.zip_path }}
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+
+      - name: Upload Debug Artifacts On Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-debug-${{ steps.resolve_tag.outputs.tag || github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            build/**
+            dist/**
+            release_notes.md
