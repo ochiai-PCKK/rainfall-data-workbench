@@ -5,6 +5,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -186,33 +187,35 @@ def launch_style_tuner(
     }
 
     all_controls: list[tuple[str, str, float, float, float]] = [
-        ("fig_width", "幅(inch)", 1.0, 18.0, 0.1),
-        ("fig_height", "高さ(inch)", 1.0, 12.0, 0.1),
         ("dpi", "DPI", 72.0, 300.0, 1.0),
-        ("left", "余白 left", 0.02, 0.3, 0.005),
-        ("right", "余白 right", 0.7, 0.98, 0.005),
-        ("top", "余白 top", 0.7, 0.98, 0.005),
-        ("bottom", "余白 bottom", 0.02, 0.3, 0.005),
-        ("hspace", "hspace", 0.0, 0.2, 0.005),
-        ("title_fontsize", "タイトル", 4.0, 24.0, 0.5),
+        ("fig_width", "図幅 (inch)", 1.0, 18.0, 0.1),
+        ("fig_height", "図高 (inch)", 1.0, 12.0, 0.1),
+        ("left", "余白 左", 0.02, 0.3, 0.005),
+        ("right", "余白 右", 0.7, 0.98, 0.005),
+        ("top", "余白 上", 0.7, 0.98, 0.005),
+        ("bottom", "余白 下", 0.02, 0.3, 0.005),
+        ("hspace", "上下グラフ間隔", 0.0, 0.2, 0.005),
+        ("title_fontsize", "タイトル文字サイズ", 4.0, 24.0, 0.5),
         ("title_pad", "タイトル余白", 0.0, 30.0, 0.5),
-        ("axis_label_fontsize", "軸ラベル", 4.0, 20.0, 0.5),
+        ("axis_label_fontsize", "軸ラベル文字サイズ", 4.0, 20.0, 0.5),
+        ("tick_fontsize", "目盛文字サイズ", 3.0, 18.0, 0.5),
         ("y1_label_pad", "左軸ラベル余白", 0.0, 40.0, 0.5),
         ("y2_label_pad", "右軸ラベル余白", 0.0, 40.0, 0.5),
         ("y_tick_pad", "左右目盛余白", 0.0, 20.0, 0.5),
-        ("tick_fontsize", "目盛", 3.0, 18.0, 0.5),
-        ("line_width", "折れ線幅", 0.5, 6.0, 0.1),
-        ("bar_width_hours", "棒幅(時間)", 0.4, 1.2, 0.02),
-        ("bar_edge_linewidth", "棒エッジ幅", 0.0, 2.0, 0.05),
+        ("line_width", "累加線の太さ", 0.5, 6.0, 0.1),
+        ("bar_width_hours", "棒幅 (時間h)", 0.4, 1.2, 0.02),
+        ("bar_edge_linewidth", "棒枠線の太さ", 0.0, 2.0, 0.05),
         ("table_height_ratio", "テーブル高", 0.8, 4.0, 0.05),
-        ("table_row_top_y", "テーブル上段Y", 1.0, 1.95, 0.02),
-        ("table_row_bottom_y", "テーブル下段Y", 0.05, 0.95, 0.02),
-        ("table_vertical_linewidth", "テーブル縦線", 0.2, 2.0, 0.05),
+        ("table_row_top_y", "テーブル上段位置", 1.0, 1.95, 0.02),
+        ("table_row_bottom_y", "テーブル下段位置", 0.05, 0.95, 0.02),
+        ("table_vertical_linewidth", "テーブル縦線の太さ", 0.2, 2.0, 0.05),
         ("grid_y_linewidth", "横グリッド線幅", 0.1, 2.0, 0.05),
         ("grid_y_alpha", "横グリッド透過", 0.1, 1.0, 0.05),
         ("grid_x_linewidth", "縦グリッド線幅", 0.1, 2.0, 0.05),
         ("grid_x_alpha", "縦グリッド透過", 0.1, 1.0, 0.05),
     ]
+    label_font = tkfont.nametofont("TkDefaultFont")
+    label_col_minsize = max(label_font.measure(label) for _key, label, *_rest in all_controls) + 16
     control_meta = {
         key: {
             "min": vmin,
@@ -610,7 +613,10 @@ def launch_style_tuner(
     for key, label, vmin, vmax, _step in all_controls:
         frm = ttk.Frame(settings_inner)
         frm.pack(fill=tk.X, pady=1)
-        ttk.Label(frm, text=label, width=14).pack(side=tk.LEFT)
+        frm.columnconfigure(0, minsize=label_col_minsize)
+        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(2, pad=10)
+        ttk.Label(frm, text=label, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 6))
         scale = ttk.Scale(
             frm,
             from_=vmin,
@@ -619,7 +625,7 @@ def launch_style_tuner(
             orient=tk.HORIZONTAL,
             command=lambda _value, scale_key=key: _on_scale_changed(scale_key),
         )
-        scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scale.grid(row=0, column=1, sticky="ew")
         scale.bind("<Button-1>", lambda event, scale_key=key: _on_scale_press(event, scale_key))
         scale.bind("<ButtonRelease-1>", lambda event, scale_key=key: _on_scale_release(event, scale_key))
         scale.bind("<KeyRelease>", lambda _e, scale_key=key: _on_scale_commit(scale_key))
@@ -627,7 +633,7 @@ def launch_style_tuner(
         entry_var = tk.StringVar(value=_format_control_value(key, float(vars_map[key].get())))
         entry_vars[key] = entry_var
         entry = ttk.Entry(frm, width=7, textvariable=entry_var)
-        entry.pack(side=tk.LEFT, padx=(4, 0))
+        entry.grid(row=0, column=2, sticky="w", padx=(8, 10))
         entry.bind("<Return>", lambda event, entry_key=key: _on_entry_commit(entry_key, event))
         entry.bind("<FocusOut>", lambda event, entry_key=key: _on_entry_commit(entry_key, event))
 

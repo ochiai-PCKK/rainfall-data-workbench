@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
+import os
+import shutil
+import tempfile
 import threading
 import tkinter as tk
 from dataclasses import replace
@@ -11,12 +15,20 @@ from typing import cast
 
 from ..application import run_zipflow
 from ..errors import ZipFlowError
-from ..excel_application import ExcelRunConfig, parse_event_sheet_date, resolve_effective_base_date, run_excel_mode
+from ..excel_application import (
+    ExcelRunConfig,
+    collect_excel_event_candidates,
+    export_excel_event_candidates_csv,
+    parse_event_sheet_date,
+    resolve_effective_base_date,
+    run_excel_mode,
+)
 from ..graph_builder import build_reference_output_paths
 from ..models import RunConfig
 from ..regions import load_region_specs
 from ..runtime_paths import resolve_path
 from ..style_profile import default_style_profile_path
+from ..zip_selector import list_zip_windows
 from .excel_mode_panel import ExcelModePanel
 from .rain_mode_panel import RainModePanel
 from .style_tuner_window import launch_style_tuner
@@ -26,6 +38,9 @@ _DATE_FMT = "%Y-%m-%d"
 _GUI_STATE_PATH = resolve_path("config", "uc_rainfall_zipflow", "gui_state.json")
 _SCREENSHOT_DIR = resolve_path("outputs", "_gui_screenshots")
 _GUI_TEST_DIR = resolve_path("outputs", "_gui_test")
+_EXCEL_CANDIDATES_DIR = resolve_path("outputs", "excel_candidates")
+_EXCEL_INPUT_DIR = resolve_path("data", "excel_input")
+_DEV_UI_ENV = "UC_ZIPFLOW_DEV_UI"
 _RUN_MODES = ("解析雨量データ", "Excelデータ")
 
 _REGION_LABELS = {
@@ -101,6 +116,7 @@ class ZipFlowGui:
         auto_capture_seconds: float | None = None,
         auto_exit_after_capture: bool = False,
         test_mode: bool = False,
+        dev_mode: bool | None = None,
     ) -> None:
         self.root = tk.Tk()
         self.root.withdraw()
@@ -121,6 +137,8 @@ class ZipFlowGui:
         self._status_error_fg = "#B71C1C"
         self._saved_rain_region_state: dict[str, bool] | None = None
         self._saved_rain_output_state: dict[str, bool] | None = None
+        self._dev_window: tk.Toplevel | None = None
+        self._dev_mode = dev_mode
 
         self._build_vars()
         self._build_layout()
@@ -135,6 +153,7 @@ class ZipFlowGui:
         self.root.bind("<Control-Shift-S>", self._on_capture_shortcut)
         self.root.bind("<F12>", self._on_capture_shortcut)
         self._append_log("画面を初期化しました。")
+        self._open_dev_tools_window_if_enabled()
         if self._auto_capture_seconds is not None and self._auto_capture_seconds >= 0.0:
             delay_ms = int(self._auto_capture_seconds * 1000)
             self.root.after(delay_ms, self._auto_capture_once)
@@ -219,6 +238,8 @@ class ZipFlowGui:
         self.updated_var = tk.StringVar(value="最終更新: --")
         self.graph_span_var = tk.StringVar(value="自動判定: 3日")
         self.tuner_csv_var = tk.StringVar(value="")
+        self.rain_dates_csv_var = tk.StringVar(value="")
+        self.rain_dates_excel_var = tk.StringVar(value="")
         self.tuner_help_var = tk.StringVar(
             value="自動選択: 流域最新 -> 直近実行 -> 手動選択（CSV未指定時は疑似データで起動）"
         )
@@ -335,6 +356,7 @@ class ZipFlowGui:
             start_date_var=self.start_date_var,
             end_date_var=self.end_date_var,
             on_change=self._update_graph_span_label,
+            on_import_excel=self._on_import_rain_dates_from_excel,
         )
         self.excel_panel = ExcelModePanel.create(
             self.mode_input_container,
@@ -662,10 +684,14 @@ class ZipFlowGui:
 
     def _update_graph_span_label(self) -> None:
         run_button = getattr(self, "run_button", None)
+        def _set_run_enabled(enabled: bool) -> None:
+            if run_button is None:
+                return
+            run_button.configure(state=tk.NORMAL if (enabled and not self._is_running) else tk.DISABLED)
+
         if self.run_mode_var.get().strip() == "Excelデータ":
             self.graph_span_var.set(f"Excel指定: {self.excel_panel.get_span_label()}")
-            if run_button is not None:
-                run_button.configure(state=tk.NORMAL)
+            _set_run_enabled(True)
             if self.status_var.get().startswith("期間エラー"):
                 self._set_status("待機中")
             return
@@ -675,14 +701,12 @@ class ZipFlowGui:
                 self.graph_span_var.set(
                     f"解析雨量指定: {self.rain_panel.get_window_mode_label()} / 対象日={len(selected_dates)}件"
                 )
-                if run_button is not None:
-                    run_button.configure(state=tk.NORMAL)
+                _set_run_enabled(True)
                 if self.status_var.get().startswith("期間エラー"):
                     self._set_status("待機中")
             else:
                 self.graph_span_var.set("解析雨量指定: 対象日未選択")
-                if run_button is not None:
-                    run_button.configure(state=tk.DISABLED)
+                _set_run_enabled(False)
                 self._set_status("期間エラー（対象日を選択）", is_error=True)
             return
         try:
@@ -691,19 +715,16 @@ class ZipFlowGui:
             day_count = (end - start).days + 1
             if day_count in (3, 5):
                 self.graph_span_var.set(f"自動判定: {day_count}日")
-                if run_button is not None:
-                    run_button.configure(state=tk.NORMAL)
+                _set_run_enabled(True)
                 if self.status_var.get().startswith("期間エラー"):
                     self._set_status("待機中")
             else:
                 self.graph_span_var.set("自動判定: 期間エラー（3日 or 5日）")
-                if run_button is not None:
-                    run_button.configure(state=tk.DISABLED)
+                _set_run_enabled(False)
                 self._set_status("期間エラー（3日 or 5日）", is_error=True)
         except ValueError:
             self.graph_span_var.set("自動判定: 日付形式エラー")
-            if run_button is not None:
-                run_button.configure(state=tk.DISABLED)
+            _set_run_enabled(False)
             self._set_status("期間エラー（3日 or 5日）", is_error=True)
 
     def _refresh_region_choices(self) -> None:
@@ -736,6 +757,8 @@ class ZipFlowGui:
             "rain_selected_dates": [
                 self.rain_panel.date_listbox.get(i) for i in self.rain_panel.date_listbox.curselection()
             ],
+            "rain_dates_csv_path": self.rain_dates_csv_var.get().strip(),
+            "rain_dates_excel_path": self.rain_dates_excel_var.get().strip(),
             "output_dir": self.output_dir_var.get().strip(),
             "polygon_dir": self.polygon_dir_var.get().strip(),
             "period_start": self.start_date_var.get().strip(),
@@ -757,6 +780,8 @@ class ZipFlowGui:
             str(state.get("rain_period_input_mode", self.rain_panel.period_input_mode_var.get()))
         )
         self.rain_panel.window_mode_var.set(str(state.get("rain_window_mode", self.rain_panel.get_window_mode())))
+        self.rain_dates_csv_var.set(str(state.get("rain_dates_csv_path", self.rain_dates_csv_var.get())))
+        self.rain_dates_excel_var.set(str(state.get("rain_dates_excel_path", self.rain_dates_excel_var.get())))
         self.rain_panel.mark_zipdir_changed()
         selected_rain_dates = set(cast(list[str], state.get("rain_selected_dates", [])))
         if selected_rain_dates and self.rain_panel.date_listbox.size() > 0:
@@ -792,6 +817,215 @@ class ZipFlowGui:
             for key, var in self.graph_kind_vars.items():
                 var.set(key in graph_kinds)
         self._update_input_mode_visibility()
+
+    def _on_import_rain_dates_csv(self) -> None:
+        initial_csv = self.rain_dates_csv_var.get().strip()
+        if initial_csv:
+            initial_dir = str(Path(initial_csv).parent)
+            initial_file = Path(initial_csv).name
+        else:
+            initial_dir = str(_EXCEL_CANDIDATES_DIR if _EXCEL_CANDIDATES_DIR.exists() else Path("."))
+            initial_file = ""
+        selected = filedialog.askopenfilename(
+            title="候補日CSVを選択",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            filetypes=[("CSV", "*.csv"), ("すべて", "*.*")],
+        )
+        if not selected:
+            return
+
+        csv_path = Path(selected)
+        self.rain_dates_csv_var.set(str(csv_path))
+        try:
+            parsed_dates, invalid_count = self._read_event_dates_csv(csv_path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("CSV読込エラー", str(exc))
+            self._append_log(f"[ERROR] 候補日CSV読込失敗: {exc}")
+            return
+        if not parsed_dates:
+            messagebox.showwarning("候補日CSV取込", "有効な event_date が見つかりませんでした。")
+            self._append_log("候補日CSV取込: 有効日付なし")
+            return
+
+        if not self.rain_panel.is_auto_mode():
+            self.rain_panel.period_input_mode_var.set("auto_dates")
+        self.rain_panel.refresh_candidates(self.input_zipdir_var.get().strip(), force=False)
+        if self.rain_panel.date_listbox.size() == 0:
+            messagebox.showwarning("候補日CSV取込", "候補日が空のため、CSV内容を反映できませんでした。")
+            self._append_log("候補日CSV取込: 候補日リストが空")
+            return
+
+        result = self.rain_panel.apply_target_dates(parsed_dates)
+        unmatched = cast(list[str], result["unmatched_dates"])
+        preview = "\n".join(unmatched[:8])
+        extra = max(0, len(unmatched) - 8)
+        if extra > 0:
+            preview += f"\n... 他 {extra} 件"
+        summary = (
+            f"読込件数: {result['requested_count']} 件\n"
+            f"選択反映: {result['matched_count']} 件\n"
+            f"不一致: {result['unmatched_count']} 件\n"
+            f"日付形式不正: {invalid_count} 件"
+        )
+        if unmatched:
+            summary += f"\n\n不一致日付（先頭）:\n{preview}"
+        messagebox.showinfo("候補日CSV取込", summary)
+        self._append_log(
+            "候補日CSV取込: "
+            f"requested={result['requested_count']} matched={result['matched_count']} "
+            f"unmatched={result['unmatched_count']} invalid={invalid_count} file={csv_path}"
+        )
+        self._update_graph_span_label()
+        _save_state(self._collect_state_payload())
+
+    def _on_import_rain_dates_from_excel(self) -> None:
+        initial_excel = self.rain_dates_excel_var.get().strip() or self.input_excel_var.get().strip()
+        if initial_excel:
+            initial_dir = str(Path(initial_excel).parent)
+            initial_file = Path(initial_excel).name
+        else:
+            initial_dir = str(_EXCEL_INPUT_DIR if _EXCEL_INPUT_DIR.exists() else Path("."))
+            initial_file = ""
+        selected = filedialog.askopenfilename(
+            title="候補日抽出元Excelを選択",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            filetypes=[("Excel", "*.xlsx;*.xls"), ("すべて", "*.*")],
+        )
+        if not selected:
+            return
+
+        excel_path = Path(selected)
+        self.rain_dates_excel_var.set(str(excel_path))
+        try:
+            candidates = collect_excel_event_candidates(excel_path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Excel読込エラー", str(exc))
+            self._append_log(f"[ERROR] Excel候補日取込失敗: {exc}")
+            return
+        if not candidates:
+            messagebox.showwarning("Excel候補日取込", "日付解釈できるシートが見つかりませんでした。")
+            self._append_log("Excel候補日取込: 有効候補なし")
+            return
+
+        parsed_dates = sorted({item.event_date for item in candidates})
+        if not self.rain_panel.is_auto_mode():
+            self.rain_panel.period_input_mode_var.set("auto_dates")
+        self.rain_panel.refresh_candidates(self.input_zipdir_var.get().strip(), force=False)
+        if self.rain_panel.date_listbox.size() == 0:
+            messagebox.showwarning("Excel候補日取込", "候補日が空のため、Excel内容を反映できませんでした。")
+            self._append_log("Excel候補日取込: 候補日リストが空")
+            return
+
+        result = self.rain_panel.apply_target_dates(parsed_dates)
+        unmatched = cast(list[str], result["unmatched_dates"])
+        preview = "\n".join(unmatched[:8])
+        extra = max(0, len(unmatched) - 8)
+        if extra > 0:
+            preview += f"\n... 他 {extra} 件"
+        summary = (
+            f"Excel候補シート件数: {len(candidates)} 件\n"
+            f"ユニーク日付数: {len(parsed_dates)} 件\n"
+            f"選択反映: {result['matched_count']} 件\n"
+            f"不一致: {result['unmatched_count']} 件"
+        )
+        if unmatched:
+            summary += f"\n\n不一致日付（先頭）:\n{preview}"
+        messagebox.showinfo("Excel候補日取込", summary)
+        self._append_log(
+            "Excel候補日取込: "
+            f"sheets={len(candidates)} unique_dates={len(parsed_dates)} "
+            f"matched={result['matched_count']} unmatched={result['unmatched_count']} file={excel_path}"
+        )
+        self._update_graph_span_label()
+        _save_state(self._collect_state_payload())
+
+    def _read_event_dates_csv(self, csv_path: Path) -> tuple[list[date], int]:
+        if not csv_path.exists():
+            raise ValueError(f"CSVファイルが見つかりません: {csv_path}")
+        parsed: list[date] = []
+        invalid_count = 0
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or "event_date" not in reader.fieldnames:
+                raise ValueError("CSVに event_date 列がありません。")
+            for row in reader:
+                raw = str((row.get("event_date") or "")).strip()
+                if not raw:
+                    continue
+                try:
+                    parsed.append(datetime.strptime(raw, _DATE_FMT).date())
+                except ValueError:
+                    invalid_count += 1
+        return parsed, invalid_count
+
+    def _is_dev_ui_enabled(self) -> bool:
+        if self._dev_mode is not None:
+            return bool(self._dev_mode)
+        return os.environ.get(_DEV_UI_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _open_dev_tools_window_if_enabled(self) -> None:
+        if not self._is_dev_ui_enabled():
+            return
+        if self._dev_window is not None and self._dev_window.winfo_exists():
+            return
+        win = tk.Toplevel(self.root)
+        win.title("開発者ツール")
+        win.resizable(False, False)
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="開発者向け補助機能", font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 6))
+        ttk.Button(frame, text="解析雨量: 候補日CSV取込", command=self._on_import_rain_dates_csv).pack(
+            fill=tk.X, pady=(0, 4)
+        )
+        ttk.Button(frame, text="Excel: 候補日CSV出力", command=self._on_export_excel_candidates_csv).pack(
+            fill=tk.X, pady=(0, 4)
+        )
+        ttk.Label(
+            frame,
+            text=f"表示条件: 環境変数 {_DEV_UI_ENV}=1",
+        ).pack(anchor=tk.W, pady=(6, 0))
+        self._dev_window = win
+
+    def _on_export_excel_candidates_csv(self) -> None:
+        excel_path = self.input_excel_var.get().strip()
+        if not excel_path:
+            messagebox.showerror("入力エラー", "Excelモードでは入力Excelファイルを指定してください。")
+            return
+        input_excel = Path(excel_path)
+        if not input_excel.exists():
+            messagebox.showerror("入力エラー", f"入力Excelファイルが見つかりません: {excel_path}")
+            return
+
+        output_all_csv = _EXCEL_CANDIDATES_DIR / f"{input_excel.stem}_候補日付リスト.csv"
+        output_unique_csv = _EXCEL_CANDIDATES_DIR / f"{input_excel.stem}_候補日付一覧_unique.csv"
+        try:
+            result = export_excel_event_candidates_csv(
+                input_excel=input_excel,
+                output_all_csv=output_all_csv,
+                output_unique_csv=output_unique_csv,
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("CSV出力エラー", str(exc))
+            self._append_log(f"[ERROR] Excel候補日CSV出力失敗: {exc}")
+            return
+
+        self._append_log(
+            "Excel候補日CSVを出力しました: "
+            f"candidates={result['candidate_count']} unique={result['unique_date_count']}"
+        )
+        messagebox.showinfo(
+            "候補日CSV出力完了",
+            "Excel候補日CSVを2件出力しました。\n\n"
+            f"詳細一覧:\n{result['output_all_csv']}\n\n"
+            f"重複除去一覧:\n{result['output_unique_csv']}\n\n"
+            "利用用途:\n"
+            "- 重複除去一覧（*_候補日付一覧_unique.csv）は、\n"
+            "  解析雨量モードの「候補日CSV取込」ボタンで\n"
+            "  対象日を一括指定する用途に使えます。",
+        )
 
     def _build_rain_run_configs(self) -> tuple[list[RunConfig], int]:
         mode = self.run_mode_var.get().strip()
@@ -974,6 +1208,47 @@ class ZipFlowGui:
             return "overwrite"
         return "rename"
 
+    def _resolve_conflict_policy_for_plot_ref_batch(self, configs: list[RunConfig]) -> str | None:
+        if not configs:
+            return "rename"
+        expected: list[Path] = []
+        for cfg in configs:
+            if "plots_ref" not in cfg.output_kinds:
+                continue
+            expected.extend(
+                build_reference_output_paths(
+                    output_dir=cfg.output_root / "plots_reference",
+                    region_keys=cfg.region_keys,
+                    base_date=cfg.base_date,
+                    graph_spans=cfg.graph_spans,
+                    ref_graph_kinds=cfg.ref_graph_kinds,
+                    export_svg=cfg.export_svg,
+                )
+            )
+        if not expected:
+            return configs[0].on_conflict
+
+        conflicts = sorted({p for p in expected if p.exists()}, key=lambda p: str(p))
+        if not conflicts:
+            return configs[0].on_conflict
+
+        preview = "\n".join(str(p) for p in conflicts[:8])
+        if len(conflicts) > 8:
+            preview += f"\n... 他 {len(conflicts) - 8} 件"
+        action = messagebox.askyesnocancel(
+            "出力先の重複確認（全対象日）",
+            "既存のグラフファイルが見つかりました（全対象日まとめて判定）。\n"
+            "はい: すべて上書き\n"
+            "いいえ: すべて別名保存(_v2, _v3...)\n"
+            "キャンセル: 実行中止\n\n"
+            f"重複候補:\n{preview}",
+        )
+        if action is None:
+            return None
+        if action is True:
+            return "overwrite"
+        return "rename"
+
     def _confirm_excel_run(self, config: ExcelRunConfig) -> bool:
         span_label = self.excel_panel.get_span_label()
         kind_labels = [str(_GRAPH_KIND_LABELS.get(k, k)) for k in config.ref_graph_kinds]
@@ -1020,6 +1295,7 @@ class ZipFlowGui:
             self._append_log(f"ファイル衝突時の挙動: {policy}")
             self._is_running = True
             self._set_status("実行中")
+            self._update_graph_span_label()
             self._append_log(
                 f"実行開始(Excel): sheets={list(excel_config.selected_sheets)} "
                 f"span={excel_config.graph_span} graph_kinds={list(excel_config.ref_graph_kinds)}"
@@ -1038,6 +1314,7 @@ class ZipFlowGui:
 
                 def done() -> None:
                     self._is_running = False
+                    self._update_graph_span_label()
                     if error_text is not None:
                         self._set_status("失敗", is_error=True)
                         self._append_log(error_text)
@@ -1060,20 +1337,21 @@ class ZipFlowGui:
         except ValueError as exc:
             messagebox.showerror("入力エラー", str(exc))
             return
-        configs_with_policy: list[RunConfig] = []
-        for cfg in configs:
-            policy = self._resolve_conflict_policy_for_plot_ref(cfg)
-            if policy is None:
-                self._append_log("実行をキャンセルしました（出力ファイル重複）。")
-                self._set_status("待機中")
-                return
-            cfg = replace(cfg, on_conflict=policy)
-            configs_with_policy.append(cfg)
+        configs, style_snapshot_dir = self._freeze_style_profile_for_run(configs)
+        if style_snapshot_dir is not None:
+            self._append_log(f"スタイル設定を実行用スナップショットに固定: {style_snapshot_dir}")
+        policy = self._resolve_conflict_policy_for_plot_ref_batch(configs)
+        if policy is None:
+            self._append_log("実行をキャンセルしました（出力ファイル重複）。")
+            self._set_status("待機中")
+            return
+        configs_with_policy = [replace(cfg, on_conflict=policy) for cfg in configs]
         if configs_with_policy and "plots_ref" in configs_with_policy[0].output_kinds:
             self._append_log(f"ファイル衝突時の挙動: {configs_with_policy[0].on_conflict}")
 
         self._is_running = True
         self._set_status("実行中")
+        self._update_graph_span_label()
         if len(configs_with_policy) == 1:
             cfg = configs_with_policy[0]
             self._append_log(
@@ -1091,9 +1369,40 @@ class ZipFlowGui:
         def worker() -> None:
             result: dict[str, object] | None = None
             error_text: str | None = None
+
+            def emit_log(message: str) -> None:
+                self.root.after(0, lambda m=message: self._append_log(m))
+
             try:
+                zip_windows_cache: dict[Path, list] = {}
+                regions_cache: dict[Path, list] = {}
+                for cfg in configs_with_policy:
+                    zip_key = cfg.input_zipdir.resolve()
+                    if zip_key not in zip_windows_cache:
+                        zip_windows_cache[zip_key] = list_zip_windows(input_zipdir=cfg.input_zipdir)
+                    polygon_key = cfg.polygon_dir.resolve()
+                    if polygon_key not in regions_cache:
+                        regions_cache[polygon_key] = load_region_specs(cfg.polygon_dir)
+                emit_log(
+                    f"事前準備: ZIP期間一覧 {len(zip_windows_cache)}件, 流域定義 {len(regions_cache)}件 を共有化"
+                )
+
                 if len(configs_with_policy) == 1:
-                    result = run_zipflow(configs_with_policy[0])
+                    cfg = configs_with_policy[0]
+                    emit_log(
+                        "処理中: ZIP選定・ラスタ切出し・集計を実行中 "
+                        f"({cfg.start_date:%Y-%m-%d}..{cfg.end_date:%Y-%m-%d})"
+                    )
+                    result = run_zipflow(
+                        cfg,
+                        prelisted_windows=zip_windows_cache[cfg.input_zipdir.resolve()],
+                        preloaded_regions=regions_cache[cfg.polygon_dir.resolve()],
+                    )
+                    emit_log(
+                        "処理中: 集計完了 "
+                        f"(zip={result.get('zip_count')} plot={result.get('plot_count')} "
+                        f"csv={result.get('csv_count')}/{result.get('cell_csv_count')})"
+                    )
                 else:
                     agg_plot = 0
                     agg_zip = 0
@@ -1101,8 +1410,24 @@ class ZipFlowGui:
                     agg_cell_csv = 0
                     last_base_dir = None
                     last_log_path = None
-                    for cfg in configs_with_policy:
-                        one = run_zipflow(cfg)
+                    total_jobs = len(configs_with_policy)
+                    for idx, cfg in enumerate(configs_with_policy, start=1):
+                        emit_log(
+                            f"処理中 [{idx}/{total_jobs}]: "
+                            f"target={cfg.base_date:%Y-%m-%d} "
+                            f"period={cfg.start_date:%Y-%m-%d}..{cfg.end_date:%Y-%m-%d}"
+                        )
+                        one = run_zipflow(
+                            cfg,
+                            prelisted_windows=zip_windows_cache[cfg.input_zipdir.resolve()],
+                            preloaded_regions=regions_cache[cfg.polygon_dir.resolve()],
+                        )
+                        emit_log(
+                            f"処理完了 [{idx}/{total_jobs}]: "
+                            f"target={cfg.base_date:%Y-%m-%d} "
+                            f"zip={one.get('zip_count')} plot={one.get('plot_count')} "
+                            f"csv={one.get('csv_count')}/{one.get('cell_csv_count')}"
+                        )
                         agg_plot += int(one.get("plot_count") or 0)
                         agg_zip += int(one.get("zip_count") or 0)
                         agg_csv += int(one.get("csv_count") or 0)
@@ -1122,9 +1447,13 @@ class ZipFlowGui:
                 error_text = f"[ERROR] {exc}"
             except Exception as exc:  # noqa: BLE001
                 error_text = f"[ERROR] 想定外エラー: {exc}"
+            finally:
+                if style_snapshot_dir is not None:
+                    shutil.rmtree(style_snapshot_dir, ignore_errors=True)
 
             def done() -> None:
                 self._is_running = False
+                self._update_graph_span_label()
                 if error_text is not None:
                     self._set_status("失敗", is_error=True)
                     self._append_log(error_text)
@@ -1141,6 +1470,35 @@ class ZipFlowGui:
             self.root.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _freeze_style_profile_for_run(self, configs: list[RunConfig]) -> tuple[list[RunConfig], Path | None]:
+        style_paths = {cfg.style_profile_path for cfg in configs if cfg.style_profile_path is not None}
+        if not style_paths:
+            return configs, None
+
+        snapshot_dir = Path(tempfile.mkdtemp(prefix="uc_rainfall_style_snapshot_"))
+        snapshot_map: dict[Path, Path] = {}
+        try:
+            for src in style_paths:
+                assert src is not None
+                if not src.exists():
+                    continue
+                dest = snapshot_dir / src.name
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+                snapshot_map[src] = dest
+
+            frozen: list[RunConfig] = []
+            for cfg in configs:
+                src = cfg.style_profile_path
+                if src is None:
+                    frozen.append(cfg)
+                    continue
+                frozen_path = snapshot_map.get(src, src)
+                frozen.append(replace(cfg, style_profile_path=frozen_path))
+            return frozen, snapshot_dir
+        except Exception:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+            raise
 
     def _format_summary(self, result: dict[str, object]) -> str:
         if result.get("event_count") is not None:
@@ -1387,8 +1745,8 @@ class ZipFlowGui:
         self.root.mainloop()
 
 
-def launch_zipflow_gui() -> None:
-    app = ZipFlowGui()
+def launch_zipflow_gui(*, dev_mode: bool | None = None) -> None:
+    app = ZipFlowGui(dev_mode=dev_mode)
     app.run()
 
 
@@ -1397,10 +1755,12 @@ def launch_zipflow_gui_with_capture(
     auto_capture_seconds: float | None,
     auto_exit_after_capture: bool,
     test_mode: bool = False,
+    dev_mode: bool | None = None,
 ) -> None:
     app = ZipFlowGui(
         auto_capture_seconds=auto_capture_seconds,
         auto_exit_after_capture=auto_exit_after_capture,
         test_mode=test_mode,
+        dev_mode=dev_mode,
     )
     app.run()

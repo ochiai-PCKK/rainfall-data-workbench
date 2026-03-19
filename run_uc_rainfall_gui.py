@@ -30,7 +30,14 @@ def main() -> None:
 
     from uc_rainfall_zipflow.gui.app import launch_zipflow_gui
 
-    launch_zipflow_gui()
+    dev_mode: bool | None = None
+    if len(sys.argv) >= 2:
+        raw = str(sys.argv[1]).strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            dev_mode = True
+        elif raw in {"0", "false", "no", "off"}:
+            dev_mode = False
+    launch_zipflow_gui(dev_mode=dev_mode)
 
 
 if __name__ == "__main__":

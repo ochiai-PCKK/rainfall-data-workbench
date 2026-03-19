@@ -1,15 +1,15 @@
 {
-  "run_mode": "解析雨量データ",
+  "run_mode": "Excelデータ",
   "input_zipdir": "outputs\\uc_download\\downloads",
   "input_excel": "C:/Users/yuuta.ochiai/Downloads/2010-2025_ティーセン分割_面積・ティーセン係数.xlsx",
   "excel_graph_span": "5d",
   "excel_selected_sheets": [],
   "rain_period_input_mode": "auto_dates",
   "rain_window_mode": "5d",
-  "rain_selected_dates": [
-    "2010-07-20"
-  ],
-  "output_dir": "C:/Users/yuuta.ochiai/Documents/28_jaxa_data/outputs/excel_test",
+  "rain_selected_dates": [],
+  "rain_dates_csv_path": "C:\\Users\\yuuta.ochiai\\Documents\\28_jaxa_data\\excel_candidates\\2010-2025_ティーセン候補日付一覧_unique.csv",
+  "rain_dates_excel_path": "",
+  "output_dir": "C:\\Users\\yuuta.ochiai\\Documents\\28_jaxa_data\\outputs\\kaiseki_rainfall_4",
   "polygon_dir": "data\\大阪狭山市_流域界",
   "period_start": "2010-01-04",
   "period_end": "2010-01-10",

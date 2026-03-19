@@ -28,6 +28,13 @@ class RegionRaster:
     crs: str
 
 
+@dataclass(frozen=True)
+class ClipPlan:
+    window: Window
+    transform: Affine
+    mask: np.ndarray | None = None
+
+
 def read_and_reproject_6674(raster_path):
     """TIFF を読み込み EPSG:6674 へ再投影した配列を返す。"""
     with rasterio.open(raster_path) as src:
@@ -101,24 +108,12 @@ def clip_region(
     region: RegionSpec,
 ) -> RegionRaster:
     """再投影済みラスタを領域 BBox で切り出し、領域外を NoData 化する。"""
-    height, width = full_data.shape
-    window = _intersect_window(region.bbox_6674, full_transform, width, height)
-    sub = full_data[
-        int(window.row_off) : int(window.row_off + window.height),
-        int(window.col_off) : int(window.col_off + window.width),
-    ].copy()
-    sub_transform = window_transform(window, full_transform)
-
-    mask = rasterize(
-        [(region.geometry_6674, 1)],
-        out_shape=sub.shape,
-        transform=sub_transform,
-        fill=0,
-        dtype=np.uint8,
-        all_touched=True,
+    plan = build_region_clip_plan(
+        full_transform=full_transform,
+        full_shape=full_data.shape,
+        region=region,
     )
-    sub[(mask == 0) | (~np.isfinite(sub))] = NODATA_VALUE
-    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=sub_transform, crs="EPSG:6674")
+    return apply_region_clip(full_data=full_data, plan=plan)
 
 
 def clip_masked_bbox(
@@ -130,24 +125,13 @@ def clip_masked_bbox(
     out_crs: str,
 ) -> RegionRaster:
     """任意CRSの BBox+ジオメトリで切り出し、ジオメトリ外を NoData 化する。"""
-    height, width = full_data.shape
-    window = _intersect_window(bbox, full_transform, width, height)
-    sub = full_data[
-        int(window.row_off) : int(window.row_off + window.height),
-        int(window.col_off) : int(window.col_off + window.width),
-    ].copy()
-    sub_transform = window_transform(window, full_transform)
-
-    mask = rasterize(
-        [(geometry, 1)],
-        out_shape=sub.shape,
-        transform=sub_transform,
-        fill=0,
-        dtype=np.uint8,
-        all_touched=True,
+    plan = build_masked_bbox_clip_plan(
+        full_transform=full_transform,
+        full_shape=full_data.shape,
+        bbox=bbox,
+        geometry=geometry,
     )
-    sub[(mask == 0) | (~np.isfinite(sub))] = NODATA_VALUE
-    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=sub_transform, crs=out_crs)
+    return apply_masked_bbox_clip(full_data=full_data, plan=plan, out_crs=out_crs)
 
 
 def clip_region_bbox(
@@ -157,16 +141,99 @@ def clip_region_bbox(
     bbox: tuple[float, float, float, float],
 ) -> RegionRaster:
     """再投影済みラスタを領域 BBox で切り出し、値は 0 以上に正規化する。"""
-    height, width = full_data.shape
-    window = _intersect_window(bbox, full_transform, width, height)
-    sub = full_data[
-        int(window.row_off) : int(window.row_off + window.height),
-        int(window.col_off) : int(window.col_off + window.width),
-    ].copy()
+    plan = build_bbox_clip_plan(
+        full_transform=full_transform,
+        full_shape=full_data.shape,
+        bbox=bbox,
+    )
+    return apply_bbox_clip(full_data=full_data, plan=plan)
+
+
+def build_region_clip_plan(
+    *,
+    full_transform: Affine,
+    full_shape: tuple[int, int],
+    region: RegionSpec,
+) -> ClipPlan:
+    height, width = full_shape
+    window = _intersect_window(region.bbox_6674, full_transform, width, height)
     sub_transform = window_transform(window, full_transform)
+    out_shape = (int(window.height), int(window.width))
+    mask = rasterize(
+        [(region.geometry_6674, 1)],
+        out_shape=out_shape,
+        transform=sub_transform,
+        fill=0,
+        dtype=np.uint8,
+        all_touched=True,
+    )
+    return ClipPlan(window=window, transform=sub_transform, mask=mask)
+
+
+def apply_region_clip(*, full_data: np.ndarray, plan: ClipPlan) -> RegionRaster:
+    if plan.mask is None:
+        raise ValueError("region clip plan に mask がありません。")
+    sub = full_data[
+        int(plan.window.row_off) : int(plan.window.row_off + plan.window.height),
+        int(plan.window.col_off) : int(plan.window.col_off + plan.window.width),
+    ].copy()
+    sub[(plan.mask == 0) | (~np.isfinite(sub))] = NODATA_VALUE
+    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=plan.transform, crs="EPSG:6674")
+
+
+def build_bbox_clip_plan(
+    *,
+    full_transform: Affine,
+    full_shape: tuple[int, int],
+    bbox: tuple[float, float, float, float],
+) -> ClipPlan:
+    height, width = full_shape
+    window = _intersect_window(bbox, full_transform, width, height)
+    sub_transform = window_transform(window, full_transform)
+    return ClipPlan(window=window, transform=sub_transform, mask=None)
+
+
+def apply_bbox_clip(*, full_data: np.ndarray, plan: ClipPlan) -> RegionRaster:
+    sub = full_data[
+        int(plan.window.row_off) : int(plan.window.row_off + plan.window.height),
+        int(plan.window.col_off) : int(plan.window.col_off + plan.window.width),
+    ].copy()
     sub = np.where(np.isfinite(sub), sub, 0.0)
     sub = np.where(sub < 0.0, 0.0, sub)
-    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=sub_transform, crs="EPSG:4326")
+    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=plan.transform, crs="EPSG:4326")
+
+
+def build_masked_bbox_clip_plan(
+    *,
+    full_transform: Affine,
+    full_shape: tuple[int, int],
+    bbox: tuple[float, float, float, float],
+    geometry,
+) -> ClipPlan:
+    height, width = full_shape
+    window = _intersect_window(bbox, full_transform, width, height)
+    sub_transform = window_transform(window, full_transform)
+    out_shape = (int(window.height), int(window.width))
+    mask = rasterize(
+        [(geometry, 1)],
+        out_shape=out_shape,
+        transform=sub_transform,
+        fill=0,
+        dtype=np.uint8,
+        all_touched=True,
+    )
+    return ClipPlan(window=window, transform=sub_transform, mask=mask)
+
+
+def apply_masked_bbox_clip(*, full_data: np.ndarray, plan: ClipPlan, out_crs: str) -> RegionRaster:
+    if plan.mask is None:
+        raise ValueError("masked bbox clip plan に mask がありません。")
+    sub = full_data[
+        int(plan.window.row_off) : int(plan.window.row_off + plan.window.height),
+        int(plan.window.col_off) : int(plan.window.col_off + plan.window.width),
+    ].copy()
+    sub[(plan.mask == 0) | (~np.isfinite(sub))] = NODATA_VALUE
+    return RegionRaster(data=sub.astype(np.float32, copy=False), transform=plan.transform, crs=out_crs)
 
 
 def validate_region_alignment(reference: RegionRaster, candidate: RegionRaster) -> None:

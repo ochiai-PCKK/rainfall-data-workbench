@@ -30,6 +30,17 @@ def _parse_optional_date(value: str | None):
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def _parse_dev_mode(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    raw = value.strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"--dev-mode は 1/0 (または true/false) を指定してください: {value}")
+
+
 def _parse_csv_choices(*, raw: str, available: tuple[str, ...], option_name: str) -> tuple[str, ...]:
     items = tuple(part.strip() for part in raw.split(",") if part.strip())
     if not items:
@@ -132,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="起動テストを実行してスクリーンショット/JSONを保存後に自動終了する",
     )
+    gui.add_argument(
+        "--dev-mode",
+        help="開発者ツールを表示するか (1/0, true/false)。未指定時は環境変数 UC_ZIPFLOW_DEV_UI に従う",
+    )
 
     excel_candidates = sub.add_parser(
         "excel-candidates",
@@ -157,19 +172,25 @@ def main() -> None:
         )
         return
     if args.command == "gui":
+        try:
+            dev_mode = _parse_dev_mode(args.dev_mode)
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.test_mode:
             launch_zipflow_gui_with_capture(
                 auto_capture_seconds=None,
                 auto_exit_after_capture=True,
                 test_mode=True,
+                dev_mode=dev_mode,
             )
         elif args.auto_capture_seconds is None:
-            launch_zipflow_gui()
+            launch_zipflow_gui(dev_mode=dev_mode)
         else:
             launch_zipflow_gui_with_capture(
                 auto_capture_seconds=float(args.auto_capture_seconds),
                 auto_exit_after_capture=bool(args.auto_exit_after_capture),
                 test_mode=False,
+                dev_mode=dev_mode,
             )
         return
     if args.command == "excel-candidates":

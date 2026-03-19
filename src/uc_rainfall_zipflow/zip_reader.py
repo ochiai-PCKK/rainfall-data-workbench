@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
+import time
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import rasterio
 from rasterio.warp import transform_bounds
@@ -22,19 +24,45 @@ def _parse_observed_at(path: Path) -> datetime | None:
     return datetime.strptime(f"{match.group(1)}{match.group(2)}", "%Y%m%d%H%M%S")
 
 
+def _cleanup_temp_dir(path: Path, *, retries: int = 8, base_wait: float = 0.15) -> None:
+    """Windows のファイルロックを考慮して一時ディレクトリを削除する。"""
+    last_error: OSError | None = None
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as exc:
+            last_error = exc
+        except OSError as exc:
+            # Windows の EBUSY/EACCES 相当は短時間で解放されることがあるため再試行する。
+            if getattr(exc, "winerror", None) in (5, 32):
+                last_error = exc
+            else:
+                raise
+        time.sleep(base_wait * (attempt + 1))
+
+    # 最終手段: ここで失敗しても実行結果は壊さない。残骸は次回以降に回収される。
+    if last_error is not None:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @contextmanager
 def extract_target_zips(selected: list[ZipWindow]):
     """選定 ZIP を一時展開してルート一覧を返す。"""
-    with TemporaryDirectory(prefix="uc_rainfall_zipflow_") as tmp:
+    tmp = Path(tempfile.mkdtemp(prefix="uc_rainfall_zipflow_"))
+    try:
         roots: list[Path] = []
-        tmp_root = Path(tmp)
         for idx, item in enumerate(selected):
-            dest = tmp_root / f"zip_{idx:02d}"
+            dest = tmp / f"zip_{idx:02d}"
             dest.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(item.path) as zf:
                 zf.extractall(dest)
             roots.append(dest)
         yield roots
+    finally:
+        _cleanup_temp_dir(tmp)
 
 
 def build_raster_index(extracted_roots: list[Path]) -> dict[datetime, list[Path]]:

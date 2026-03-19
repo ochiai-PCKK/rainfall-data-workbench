@@ -33,6 +33,7 @@ class RainModePanel:
     candidate_count_var: tk.StringVar
     selected_count_var: tk.StringVar
     refresh_button: ttk.Button
+    import_excel_button: ttk.Button
     graph_period_radios: list[ttk.Radiobutton]
     zip_windows_cache: dict[str, list[ZipWindow]]
     period_start_entry: ttk.Entry
@@ -51,6 +52,7 @@ class RainModePanel:
         start_date_var: tk.StringVar,
         end_date_var: tk.StringVar,
         on_change: Callable[[], None] | None = None,
+        on_import_excel: Callable[[], None] | None = None,
     ) -> "RainModePanel":
         frame = ttk.Frame(parent)
         period_input_mode_var = tk.StringVar(value="manual_range")
@@ -93,6 +95,8 @@ class RainModePanel:
         toolbar = ttk.Frame(frame)
         toolbar.pack(fill=tk.X, pady=(0, 2))
         ttk.Label(toolbar, text="対象日候補（複数選択可）", width=22).pack(side=tk.LEFT)
+        import_excel_button = ttk.Button(toolbar, text="Excel候補日取込", command=lambda: None)
+        import_excel_button.pack(side=tk.RIGHT, padx=(4, 0))
         refresh_button = ttk.Button(toolbar, text="候補更新", command=lambda: None, width=8)
         refresh_button.pack(side=tk.RIGHT)
 
@@ -138,6 +142,7 @@ class RainModePanel:
             candidate_count_var=candidate_count_var,
             selected_count_var=selected_count_var,
             refresh_button=refresh_button,
+            import_excel_button=import_excel_button,
             graph_period_radios=graph_period_radios,
             zip_windows_cache={},
             period_start_entry=period_start_entry,
@@ -146,11 +151,10 @@ class RainModePanel:
             graph_period_row=row_mode,
             period_input_mode_row=row_input_mode,
         )
-        for child in toolbar.winfo_children():
-            if isinstance(child, ttk.Button):
-                child.configure(
-                    command=lambda p=panel, v=input_zip_var: p.refresh_candidates(v.get().strip(), force=True)
-                )
+        refresh_button.configure(
+            command=lambda p=panel, v=input_zip_var: p.refresh_candidates(v.get().strip(), force=True)
+        )
+        import_excel_button.configure(command=lambda: on_import_excel() if on_import_excel is not None else None)
         date_listbox.bind(
             "<<ListboxSelect>>",
             lambda _e: (
@@ -269,6 +273,7 @@ class RainModePanel:
     def _update_auto_mode_state(self) -> None:
         state = tk.NORMAL if self.is_auto_mode() else tk.DISABLED
         self.refresh_button.configure(state=state)
+        self.import_excel_button.configure(state=state)
         self.date_listbox.configure(state=state)
         for rb in self.graph_period_radios:
             rb.configure(state=state)
@@ -280,6 +285,32 @@ class RainModePanel:
         else:
             self.date_listbox.selection_clear(0, tk.END)
         self._update_selected_count()
+
+    def apply_target_dates(self, target_dates: list[date]) -> dict[str, object]:
+        candidate_index: dict[str, int] = {}
+        for i in range(self.date_listbox.size()):
+            candidate_index[self.date_listbox.get(i).strip()] = i
+
+        unique_dates = sorted({d for d in target_dates})
+        requested = [d.strftime("%Y-%m-%d") for d in unique_dates]
+        matched: list[str] = []
+        unmatched: list[str] = []
+        self.date_listbox.selection_clear(0, tk.END)
+        for raw in requested:
+            idx = candidate_index.get(raw)
+            if idx is None:
+                unmatched.append(raw)
+                continue
+            self.date_listbox.selection_set(idx)
+            matched.append(raw)
+        self._update_selected_count()
+        return {
+            "requested_count": len(requested),
+            "matched_count": len(matched),
+            "unmatched_count": len(unmatched),
+            "matched_dates": matched,
+            "unmatched_dates": unmatched,
+        }
 
     def refresh_input_mode_state(self) -> None:
         self._update_auto_mode_state()

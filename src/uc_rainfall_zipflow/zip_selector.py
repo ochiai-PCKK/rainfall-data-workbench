@@ -57,6 +57,16 @@ def list_zip_windows(*, input_zipdir: Path) -> list[ZipWindow]:
 def select_target_zips(*, input_zipdir: Path, window_start: datetime, window_end: datetime) -> list[ZipWindow]:
     """対象期間と重なる ZIP を選定する。"""
     windows = list_zip_windows(input_zipdir=input_zipdir)
+    return select_target_zips_from_windows(windows=windows, window_start=window_start, window_end=window_end)
+
+
+def select_target_zips_from_windows(
+    *,
+    windows: list[ZipWindow],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[ZipWindow]:
+    """既存の ZIP 期間一覧から、対象期間と重なる ZIP を選定する。"""
     selected: list[ZipWindow] = []
     for item in windows:
         start_at, end_at = item.start_at, item.end_at

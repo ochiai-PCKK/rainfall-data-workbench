@@ -15,16 +15,20 @@ from .graph_builder import (
     render_region_plots_reference,
 )
 from .logger import build_logger
-from .models import RunConfig
+from .models import RegionSpec, RunConfig, ZipWindow
 from .raster_writer import write_asc, write_rain_dat_blocks, write_tiff
 from .regions import load_region_specs
 from .spatial_clip import (
     NODATA_VALUE,
+    ClipPlan,
     RegionRaster,
+    apply_bbox_clip,
+    apply_masked_bbox_clip,
+    apply_region_clip,
+    build_bbox_clip_plan,
+    build_masked_bbox_clip_plan,
     build_overlap_weights,
-    clip_masked_bbox,
-    clip_region,
-    clip_region_bbox,
+    build_region_clip_plan,
     compute_weighted_sum,
     read_and_reproject_4326,
     read_and_reproject_6674,
@@ -34,7 +38,7 @@ from .spatial_clip import (
 from .style_profile import load_style_profile
 from .time_series_builder import build_hourly_slots
 from .zip_reader import build_raster_index, extract_target_zips, resolve_slot_rasters
-from .zip_selector import select_target_zips
+from .zip_selector import select_target_zips, select_target_zips_from_windows
 
 
 def _resolve_window_range(config: RunConfig) -> tuple[datetime, datetime]:
@@ -139,11 +143,16 @@ def _write_timeseries_csv_readme(
 
 
 GridSignature = tuple[tuple[int, int], tuple[float, float, float, float, float, float]]
+WeightCacheEntry = tuple[GridSignature, np.ndarray, np.ndarray, float, int]
 
 
 def _grid_signature(region_raster: RegionRaster) -> GridSignature:
     tfm = region_raster.transform
     return region_raster.data.shape, (tfm.a, tfm.b, tfm.c, tfm.d, tfm.e, tfm.f)
+
+
+def _array_signature(data: np.ndarray, transform) -> GridSignature:
+    return data.shape, (transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
 
 
 def _build_cell_catalog_rows(region_raster: RegionRaster, weights: np.ndarray) -> list[dict[str, float | int]]:
@@ -169,7 +178,12 @@ def _build_cell_catalog_rows(region_raster: RegionRaster, weights: np.ndarray) -
     return rows
 
 
-def run_zipflow(config: RunConfig) -> dict[str, object]:
+def run_zipflow(
+    config: RunConfig,
+    *,
+    prelisted_windows: list[ZipWindow] | None = None,
+    preloaded_regions: list[RegionSpec] | None = None,
+) -> dict[str, object]:
     """ZIP Flow 実行本体。"""
     raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir = _prepare_outputs(config)
     log_path = log_dir / f"{config.base_date:%Y-%m-%d}.log"
@@ -187,11 +201,18 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
     logger.info("対象期間: %s 〜 %s (%s点)", window_start, window_end, slot_count)
 
     try:
-        selected = select_target_zips(
-            input_zipdir=config.input_zipdir,
-            window_start=window_start,
-            window_end=window_end,
-        )
+        if prelisted_windows is None:
+            selected = select_target_zips(
+                input_zipdir=config.input_zipdir,
+                window_start=window_start,
+                window_end=window_end,
+            )
+        else:
+            selected = select_target_zips_from_windows(
+                windows=prelisted_windows,
+                window_start=window_start,
+                window_end=window_end,
+            )
     except Exception as exc:  # noqa: BLE001
         raise ZipFlowError(f"ZIP 選定に失敗しました: {exc}", exit_code=3) from exc
     logger.info("採用 ZIP: %s", [item.path.name for item in selected])
@@ -199,7 +220,7 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
         raise ZipFlowError("採用 ZIP の期間が対象5日を連続で覆っていません。", exit_code=3)
 
     try:
-        all_regions = load_region_specs(config.polygon_dir)
+        all_regions = preloaded_regions if preloaded_regions is not None else load_region_specs(config.polygon_dir)
     except Exception as exc:  # noqa: BLE001
         raise ZipFlowError(f"空間領域の読込に失敗しました: {exc}", exit_code=6) from exc
     by_key = {region.region_key: region for region in all_regions}
@@ -234,10 +255,16 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
     cell_catalog_signature: dict[str, GridSignature | None] = (
         {region.region_key: None for region in regions} if enable_timeseries_csv else {}
     )
+    weight_cache: dict[str, WeightCacheEntry] = {}
     ref_raster_cache: dict[str, RegionRaster] = {}
     ref_bbox_cache: dict[str, RegionRaster] = {}
     bbox_frames: dict[str, list[np.ndarray]] = {region.region_key: [] for region in regions}
     elapsed_seconds = [slot.relative_seconds for slot in slots]
+    raster_6674_cache: dict[Path, tuple[np.ndarray, object]] = {}
+    raster_4326_cache: dict[Path, tuple[np.ndarray, object]] = {}
+    clip_plan_6674_cache: dict[tuple[str, GridSignature], ClipPlan] = {}
+    clip_plan_bbox_4326_cache: dict[tuple[str, GridSignature], ClipPlan] = {}
+    clip_plan_masked_4326_cache: dict[tuple[str, GridSignature], ClipPlan] = {}
 
     try:
         with extract_target_zips(selected) as extracted:
@@ -254,36 +281,65 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                 arr_6674 = None
                 transform_6674 = None
                 if enable_weight_calc:
-                    arr_6674, transform_6674, _ = read_and_reproject_6674(raster_path)
+                    cached_6674 = raster_6674_cache.get(raster_path)
+                    if cached_6674 is None:
+                        arr_6674, transform_6674, _ = read_and_reproject_6674(raster_path)
+                        raster_6674_cache[raster_path] = (arr_6674, transform_6674)
+                    else:
+                        arr_6674, transform_6674 = cached_6674
 
                 arr_4326 = None
                 transform_4326 = None
                 if "raster_bbox" in config.output_kinds or "raster" in config.output_kinds:
-                    arr_4326, transform_4326, _ = read_and_reproject_4326(raster_path)
+                    cached_4326 = raster_4326_cache.get(raster_path)
+                    if cached_4326 is None:
+                        arr_4326, transform_4326, _ = read_and_reproject_4326(raster_path)
+                        raster_4326_cache[raster_path] = (arr_4326, transform_4326)
+                    else:
+                        arr_4326, transform_4326 = cached_4326
 
                 for region in regions:
                     clipped = None
                     if enable_weight_calc:
                         assert arr_6674 is not None and transform_6674 is not None
-                        clipped = clip_region(
-                            full_data=arr_6674,
-                            full_transform=transform_6674,
-                            region=region,
-                        )
+                        sig_6674 = _array_signature(arr_6674, transform_6674)
+                        clip_plan_key_6674 = (region.region_key, sig_6674)
+                        clip_plan_6674 = clip_plan_6674_cache.get(clip_plan_key_6674)
+                        if clip_plan_6674 is None:
+                            clip_plan_6674 = build_region_clip_plan(
+                                full_transform=transform_6674,
+                                full_shape=arr_6674.shape,
+                                region=region,
+                            )
+                            clip_plan_6674_cache[clip_plan_key_6674] = clip_plan_6674
+                        clipped = apply_region_clip(full_data=arr_6674, plan=clip_plan_6674)
 
                     if enable_weight_calc:
                         assert clipped is not None
-                        weights = build_overlap_weights(clipped, region.geometry_6674)
-                        total_weight = float(np.sum(weights))
+                        signature = _grid_signature(clipped)
+                        cached = weight_cache.get(region.region_key)
+                        if cached is None or cached[0] != signature:
+                            weights = build_overlap_weights(clipped, region.geometry_6674)
+                            positive_mask = weights > 0.0
+                            total_weight = float(np.sum(weights))
+                            total_cell_count = int(np.count_nonzero(positive_mask))
+                            weight_cache[region.region_key] = (
+                                signature,
+                                weights,
+                                positive_mask,
+                                total_weight,
+                                total_cell_count,
+                            )
+                        else:
+                            _cached_signature, weights, positive_mask, total_weight, total_cell_count = cached
                         if total_weight <= 0.0:
                             raise ZipFlowError(
                                 f"流域内重みが0です: region={region.region_key} time={slot.observed_at_jst}",
                                 exit_code=5,
                             )
-                        valid_mask = (clipped.data != NODATA_VALUE) & np.isfinite(clipped.data) & (weights > 0.0)
+                        valid_mask = (clipped.data != NODATA_VALUE) & np.isfinite(clipped.data) & positive_mask
                         valid_weight = float(np.sum(weights[valid_mask]))
                         valid_cell_count = int(np.count_nonzero(valid_mask))
-                        total_cell_count = int(np.count_nonzero(weights > 0.0))
                         coverage = valid_weight / total_weight
                         if coverage < 0.999:
                             raise ZipFlowError(
@@ -318,7 +374,6 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                                     "weighted_mean_mm": weighted_mean,
                                 }
                             )
-                            signature = _grid_signature(clipped)
                             if cell_catalog_signature[region.region_key] is None:
                                 cell_catalog_signature[region.region_key] = signature
                                 cell_catalog_rows[region.region_key] = _build_cell_catalog_rows(clipped, weights)
@@ -332,11 +387,17 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                     clipped_bbox = None
                     if "raster_bbox" in config.output_kinds:
                         assert arr_4326 is not None and transform_4326 is not None
-                        clipped_bbox = clip_region_bbox(
-                            full_data=arr_4326,
-                            full_transform=transform_4326,
-                            bbox=bbox_4326_by_region[region.region_key],
-                        )
+                        sig_4326 = _array_signature(arr_4326, transform_4326)
+                        clip_plan_key_bbox = (region.region_key, sig_4326)
+                        clip_plan_bbox = clip_plan_bbox_4326_cache.get(clip_plan_key_bbox)
+                        if clip_plan_bbox is None:
+                            clip_plan_bbox = build_bbox_clip_plan(
+                                full_transform=transform_4326,
+                                full_shape=arr_4326.shape,
+                                bbox=bbox_4326_by_region[region.region_key],
+                            )
+                            clip_plan_bbox_4326_cache[clip_plan_key_bbox] = clip_plan_bbox
+                        clipped_bbox = apply_bbox_clip(full_data=arr_4326, plan=clip_plan_bbox)
                         ref_bbox = ref_bbox_cache.get(region.region_key)
                         if ref_bbox is None:
                             ref_bbox_cache[region.region_key] = clipped_bbox
@@ -347,11 +408,20 @@ def run_zipflow(config: RunConfig) -> dict[str, object]:
                     clipped_raster = None
                     if "raster" in config.output_kinds:
                         assert arr_4326 is not None and transform_4326 is not None
-                        clipped_raster = clip_masked_bbox(
+                        sig_4326 = _array_signature(arr_4326, transform_4326)
+                        clip_plan_key_masked = (region.region_key, sig_4326)
+                        clip_plan_masked = clip_plan_masked_4326_cache.get(clip_plan_key_masked)
+                        if clip_plan_masked is None:
+                            clip_plan_masked = build_masked_bbox_clip_plan(
+                                full_transform=transform_4326,
+                                full_shape=arr_4326.shape,
+                                bbox=bbox_4326_by_region[region.region_key],
+                                geometry=geom_4326_by_region[region.region_key],
+                            )
+                            clip_plan_masked_4326_cache[clip_plan_key_masked] = clip_plan_masked
+                        clipped_raster = apply_masked_bbox_clip(
                             full_data=arr_4326,
-                            full_transform=transform_4326,
-                            bbox=bbox_4326_by_region[region.region_key],
-                            geometry=geom_4326_by_region[region.region_key],
+                            plan=clip_plan_masked,
                             out_crs="EPSG:4326",
                         )
                         ref_raster = ref_raster_cache.get(region.region_key)
