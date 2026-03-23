@@ -31,6 +31,7 @@ class RunConfig:
     output_kinds: tuple[str, ...]
     on_conflict: str = "rename"
     reference_base_date: date | None = None
+    engine: str = "python"
 
 
 @dataclass(frozen=True)

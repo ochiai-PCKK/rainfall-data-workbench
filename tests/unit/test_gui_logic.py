@@ -42,7 +42,15 @@ class DummyRainPanel:
         return start, end, 5 if self._window_mode == "5d" else 3
 
 
-def _make_gui_stub(*, auto_mode: bool, window_mode: str, target_date: date, start: str = "", end: str = "") -> ZipFlowGui:
+def _make_gui_stub(
+    *,
+    auto_mode: bool,
+    window_mode: str,
+    target_date: date,
+    start: str = "",
+    end: str = "",
+    engine: str = "python",
+) -> ZipFlowGui:
     gui = object.__new__(ZipFlowGui)
     gui.run_mode_var = DummyVar("解析雨量データ")
     gui.input_zipdir_var = DummyVar(r"C:\\data\\zip")
@@ -52,6 +60,7 @@ def _make_gui_stub(*, auto_mode: bool, window_mode: str, target_date: date, star
     gui.export_svg_var = DummyVar(False)
     gui.start_date_var = DummyVar(start)
     gui.end_date_var = DummyVar(end)
+    gui.compute_engine_var = DummyVar(engine)
     gui.region_vars = {"nishiyoke": DummyVar(True), "yamatogawa": DummyVar(False)}
     gui.output_vars = {"plots_ref": DummyVar(True), "raster": DummyVar(False)}
     gui.graph_kind_vars = {"sum": DummyVar(True), "mean": DummyVar(False)}
@@ -101,6 +110,7 @@ def test_build_rain_run_configs_auto_mode_sets_reference_base_date(
     assert config.graph_spans == ("3d",)
     assert config.start_date == expected_reference_base_date - timedelta(days=1)
     assert config.end_date == expected_reference_base_date + timedelta(days=1)
+    assert config.engine == "python"
 
 
 def test_build_rain_run_configs_manual_mode_leaves_reference_base_date_empty(
@@ -121,3 +131,43 @@ def test_build_rain_run_configs_manual_mode_leaves_reference_base_date_empty(
     assert config.graph_spans == ("5d",)
     assert config.start_date == date(2024, 1, 1)
     assert config.end_date == date(2024, 1, 5)
+    assert config.engine == "python"
+
+
+def test_build_rain_run_configs_uses_selected_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uc_rainfall_zipflow.gui import app as app_module
+
+    monkeypatch.setattr(app_module, "default_style_profile_path", lambda: Path(r"C:\\missing\\style.json"))
+    gui = _make_gui_stub(
+        auto_mode=False,
+        window_mode="5d",
+        target_date=date(2024, 1, 3),
+        start="2024-01-01",
+        end="2024-01-05",
+        engine="rust_pyo3",
+    )
+
+    configs, _day_count = ZipFlowGui._build_rain_run_configs(gui)
+
+    assert configs[0].engine == "rust_pyo3"
+
+
+def test_build_rain_run_configs_rejects_invalid_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uc_rainfall_zipflow.gui import app as app_module
+
+    monkeypatch.setattr(app_module, "default_style_profile_path", lambda: Path(r"C:\\missing\\style.json"))
+    gui = _make_gui_stub(
+        auto_mode=False,
+        window_mode="5d",
+        target_date=date(2024, 1, 3),
+        start="2024-01-01",
+        end="2024-01-05",
+        engine="rust_subprocess",
+    )
+
+    with pytest.raises(ValueError, match="計算エンジンが不正です"):
+        ZipFlowGui._build_rain_run_configs(gui)

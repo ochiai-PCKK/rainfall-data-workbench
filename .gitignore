@@ -5,6 +5,9 @@ build/
 dist/
 wheels/
 *.egg-info
+hello_rust_20260323/
+rust/**/target/
+rust/**/target_bench/
 
 # Virtual environments
 .venv

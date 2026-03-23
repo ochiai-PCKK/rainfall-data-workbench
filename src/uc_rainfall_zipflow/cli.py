@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .application import run_zipflow
+from .benchmark_engine import run_core_benchmark
 from .errors import ZipFlowError
 from .excel_application import export_excel_event_candidates_csv
 from .gui.app import launch_zipflow_gui, launch_zipflow_gui_with_capture
@@ -18,6 +19,7 @@ _AVAILABLE_OUTPUTS_DISPLAY = ("raster", "raster_bbox", "plots", "plots_ref", "an
 _AVAILABLE_GRAPH_SPANS = ("3d", "5d")
 _AVAILABLE_REF_GRAPH_KINDS = ("sum", "mean")
 _AVAILABLE_CONFLICT_POLICIES = ("rename", "overwrite", "cancel")
+_AVAILABLE_ENGINES = ("python", "rust_pyo3")
 
 
 def _parse_base_date(value: str):
@@ -118,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
             "※timeseries_csv も互換指定可"
         ),
     )
+    run.add_argument(
+        "--engine",
+        choices=_AVAILABLE_ENGINES,
+        default="python",
+        help="計算エンジンを選択する",
+    )
 
     style_gui = sub.add_parser("style-gui", help="グラフスタイル調整を起動する")
     style_gui.add_argument("--input-csv", help="*_timeseries.csv のパス（未指定時はサンプル表示）")
@@ -154,6 +162,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     excel_candidates.add_argument("--input-excel", required=True, help="入力Excelファイル(.xlsx/.xls)")
     excel_candidates.add_argument("--output-dir", default=r"outputs\excel_candidates", help="CSV出力先ディレクトリ")
+
+    benchmark = sub.add_parser("benchmark", help="Python/Rust の集計コアを比較ベンチマークする")
+    benchmark.add_argument("--repeat", type=int, default=3, help="計測反復回数")
+    benchmark.add_argument("--warmup", type=int, default=1, help="ウォームアップ回数")
+    benchmark.add_argument("--seed", type=int, default=42, help="乱数シード")
+    benchmark.add_argument("--slots", type=int, default=120, help="時系列点数")
+    benchmark.add_argument("--rows", type=int, default=64, help="格子行数")
+    benchmark.add_argument("--cols", type=int, default=64, help="格子列数")
+    benchmark.add_argument(
+        "--output-dir",
+        default=r"outputs\uc_rainfall_zipflow\benchmarks",
+        help="ベンチ結果の出力先ディレクトリ",
+    )
+    benchmark.add_argument(
+        "--rust-manifest",
+        default=r"rust\weighted_core\Cargo.toml",
+        help="Rustベンチ実行用Cargo.tomlのパス",
+    )
+    benchmark.add_argument(
+        "--rebuild-rust",
+        action="store_true",
+        help="Rustバイナリを強制再ビルドする（既定はキャッシュ再利用）",
+    )
+    benchmark.add_argument(
+        "--use-pyo3",
+        action="store_true",
+        help="PyO3エンジン（同一プロセス）も比較対象に含める",
+    )
+    benchmark.add_argument(
+        "--pyo3-manifest",
+        default=r"rust\weighted_core_pyo3\Cargo.toml",
+        help="PyO3拡張のCargo.tomlパス",
+    )
+    benchmark.add_argument(
+        "--rebuild-pyo3",
+        action="store_true",
+        help="PyO3拡張を強制再ビルドする",
+    )
     return parser
 
 
@@ -219,6 +265,47 @@ def main() -> None:
             print(f"[ERROR] {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         return
+    if args.command == "benchmark":
+        try:
+            result = run_core_benchmark(
+                output_root=Path(args.output_dir),
+                repeat=int(args.repeat),
+                warmup=int(args.warmup),
+                seed=int(args.seed),
+                slots=int(args.slots),
+                rows=int(args.rows),
+                cols=int(args.cols),
+                rust_manifest=Path(args.rust_manifest),
+                force_rebuild=bool(args.rebuild_rust),
+                pyo3_manifest=Path(args.pyo3_manifest),
+                enable_pyo3=bool(args.use_pyo3),
+                force_rebuild_pyo3=bool(args.rebuild_pyo3),
+            )
+            print(result["output_dir"])
+            line = (
+                "speed_score={:.4f} memory_score={:.4f} total_score={:.4f} accuracy_passed={}".format(
+                    result["summary"]["speed_score"],
+                    result["summary"]["memory_score"],
+                    result["summary"]["total_score"],
+                    result["summary"]["accuracy"]["passed"],
+                )
+            )
+            if result["summary"].get("rust_pyo3"):
+                pyo3 = result["summary"]["rust_pyo3"]
+                line += " | pyo3_speed_score={:.4f} pyo3_memory_score={:.4f} pyo3_total_score={:.4f} pyo3_accuracy_passed={}".format(
+                    pyo3["speed_score"],
+                    pyo3["memory_score"],
+                    pyo3["total_score"],
+                    pyo3["accuracy"]["passed"],
+                )
+            print(line)
+        except ZipFlowError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            raise SystemExit(exc.exit_code) from exc
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        return
     if args.command != "run":
         parser.error(f"未対応コマンドです: {args.command}")
 
@@ -254,6 +341,7 @@ def main() -> None:
             region_keys=regions,
             output_kinds=outputs,
             on_conflict=args.on_conflict,
+            engine=args.engine,
         )
         result = run_zipflow(config)
         print(result["base_dir"])

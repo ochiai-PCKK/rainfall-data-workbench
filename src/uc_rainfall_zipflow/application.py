@@ -29,12 +29,12 @@ from .spatial_clip import (
     build_masked_bbox_clip_plan,
     build_overlap_weights,
     build_region_clip_plan,
-    compute_weighted_sum,
     read_and_reproject_4326,
     read_and_reproject_6674,
     transform_geometry,
     validate_region_alignment,
 )
+from .runtime_engine import compute_weighted_stats
 from .style_profile import load_style_profile
 from .time_series_builder import build_hourly_slots
 from .zip_reader import build_raster_index, extract_target_zips, resolve_slot_rasters
@@ -339,9 +339,10 @@ def run_zipflow(
                                 exit_code=5,
                             )
                         valid_mask = (clipped.data != NODATA_VALUE) & np.isfinite(clipped.data) & positive_mask
-                        valid_weight = float(np.sum(weights[valid_mask]))
                         valid_cell_count = int(np.count_nonzero(valid_mask))
-                        coverage = valid_weight / total_weight
+                        stats = compute_weighted_stats(data=clipped.data, weights=weights, engine=config.engine)
+                        valid_weight = stats.valid_weight
+                        coverage = stats.coverage_ratio
                         if coverage < 0.999:
                             raise ZipFlowError(
                                 "流域内に欠損（穴）があるため処理を中断しました: "
@@ -350,14 +351,14 @@ def run_zipflow(
                                 exit_code=5,
                             )
 
-                        weighted_value = compute_weighted_sum(clipped.data, weights)
+                        weighted_value = stats.weighted_sum
                         if not np.isfinite(weighted_value):
                             detail = f"region={region.region_key} time={slot.observed_at_jst}"
                             raise ZipFlowError(
                                 f"重み付き合計を計算できませんでした: {detail}",
                                 exit_code=5,
                             )
-                        weighted_mean = weighted_value / valid_weight if valid_weight > 0.0 else float("nan")
+                        weighted_mean = stats.weighted_mean
                         if enable_any_plot:
                             weighted_series[region.region_key].append(weighted_value)
                             weighted_mean_series[region.region_key].append(weighted_mean)

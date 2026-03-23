@@ -40,6 +40,7 @@ _EXCEL_CANDIDATES_DIR = resolve_path("outputs", "excel_candidates")
 _EXCEL_INPUT_DIR = resolve_path("data", "excel_input")
 _DEV_UI_ENV = "UC_ZIPFLOW_DEV_UI"
 _RUN_MODES = ("解析雨量データ", "Excelデータ")
+_RUNTIME_ENGINES = ("python", "rust_pyo3")
 
 _REGION_LABELS = {
     "nishiyoke": "西除川",
@@ -240,6 +241,7 @@ class ZipFlowGui:
         self.tuner_csv_var = tk.StringVar(value="")
         self.rain_dates_csv_var = tk.StringVar(value="")
         self.rain_dates_excel_var = tk.StringVar(value="")
+        self.compute_engine_var = tk.StringVar(value="python")
         self.tuner_help_var = tk.StringVar(
             value="自動選択: 流域最新 -> 直近実行 -> 手動選択（CSV未指定時は疑似データで起動）"
         )
@@ -759,6 +761,7 @@ class ZipFlowGui:
             ],
             "rain_dates_csv_path": self.rain_dates_csv_var.get().strip(),
             "rain_dates_excel_path": self.rain_dates_excel_var.get().strip(),
+            "rain_compute_engine": self.compute_engine_var.get().strip(),
             "output_dir": self.output_dir_var.get().strip(),
             "polygon_dir": self.polygon_dir_var.get().strip(),
             "period_start": self.start_date_var.get().strip(),
@@ -782,6 +785,8 @@ class ZipFlowGui:
         self.rain_panel.window_mode_var.set(str(state.get("rain_window_mode", self.rain_panel.get_window_mode())))
         self.rain_dates_csv_var.set(str(state.get("rain_dates_csv_path", self.rain_dates_csv_var.get())))
         self.rain_dates_excel_var.set(str(state.get("rain_dates_excel_path", self.rain_dates_excel_var.get())))
+        loaded_engine = str(state.get("rain_compute_engine", self.compute_engine_var.get())).strip()
+        self.compute_engine_var.set(loaded_engine if loaded_engine in _RUNTIME_ENGINES else "python")
         self.rain_panel.mark_zipdir_changed()
         self.rain_panel.refresh_candidates(self.input_zipdir_var.get().strip(), force=False)
         selected_rain_dates = set(cast(list[str], state.get("rain_selected_dates", [])))
@@ -987,6 +992,14 @@ class ZipFlowGui:
         ttk.Button(frame, text="解析雨量: 候補日CSV取込", command=self._on_import_rain_dates_csv).pack(
             fill=tk.X, pady=(0, 4)
         )
+        ttk.Label(frame, text="解析雨量: 計算エンジン").pack(anchor=tk.W, pady=(8, 2))
+        ttk.Combobox(
+            frame,
+            textvariable=self.compute_engine_var,
+            values=_RUNTIME_ENGINES,
+            state="readonly",
+            width=16,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 4))
         ttk.Button(frame, text="Excel: 候補日CSV出力", command=self._on_export_excel_candidates_csv).pack(
             fill=tk.X, pady=(0, 4)
         )
@@ -1048,6 +1061,9 @@ class ZipFlowGui:
         graph_kinds = tuple(k for k, v in self.graph_kind_vars.items() if v.get())
         if not graph_kinds:
             raise ValueError("グラフ指標を1つ以上選択してください。")
+        engine = self.compute_engine_var.get().strip()
+        if engine not in _RUNTIME_ENGINES:
+            raise ValueError(f"計算エンジンが不正です: {engine}")
 
         default_style_path = default_style_profile_path()
         style_path = default_style_path if default_style_path.exists() else None
@@ -1082,6 +1098,7 @@ class ZipFlowGui:
                         region_keys=region_keys,
                         output_kinds=output_kinds,
                         on_conflict="rename",
+                        engine=engine,
                     )
                 )
             return configs, day_count
@@ -1112,6 +1129,7 @@ class ZipFlowGui:
             region_keys=region_keys,
             output_kinds=output_kinds,
             on_conflict="rename",
+            engine=engine,
         )
         return [config], day_count
 
