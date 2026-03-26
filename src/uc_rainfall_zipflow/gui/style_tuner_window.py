@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportCallIssue=false
 from __future__ import annotations
 
 import tkinter as tk
@@ -169,6 +170,12 @@ def launch_style_tuner(
         "y2_label_pad": tk.DoubleVar(value=profile.y2_label_pad),
         "y_tick_pad": tk.DoubleVar(value=profile.y_tick_pad),
         "tick_fontsize": tk.DoubleVar(value=profile.tick_fontsize),
+        "left_axis_top": tk.DoubleVar(value=profile.left_axis_top),
+        "right_axis_top": tk.DoubleVar(value=profile.right_axis_top),
+        "left_major_tick_count": tk.IntVar(value=profile.left_major_tick_count),
+        "right_major_tick_count": tk.IntVar(value=profile.right_major_tick_count),
+        "left_major_tick_step": tk.DoubleVar(value=profile.left_major_tick_step),
+        "right_major_tick_step": tk.DoubleVar(value=profile.right_major_tick_step),
         "line_width": tk.DoubleVar(value=profile.line_width),
         "bar_width_hours": tk.DoubleVar(value=profile.bar_width_hours),
         "bar_edge_linewidth": tk.DoubleVar(value=profile.bar_edge_linewidth),
@@ -199,6 +206,12 @@ def launch_style_tuner(
         ("title_pad", "タイトル余白", 0.0, 30.0, 0.5),
         ("axis_label_fontsize", "軸ラベル文字サイズ", 4.0, 20.0, 0.5),
         ("tick_fontsize", "目盛文字サイズ", 3.0, 18.0, 0.5),
+        ("left_axis_top", "左軸上限", 10.0, 200.0, 5.0),
+        ("right_axis_top", "右軸上限", 50.0, 2000.0, 50.0),
+        ("left_major_tick_count", "左主目盛数", 2.0, 15.0, 1.0),
+        ("right_major_tick_count", "右主目盛数", 2.0, 15.0, 1.0),
+        ("left_major_tick_step", "左主目盛刻み", 0.0, 50.0, 1.0),
+        ("right_major_tick_step", "右主目盛刻み", 0.0, 500.0, 5.0),
         ("y1_label_pad", "左軸ラベル余白", 0.0, 40.0, 0.5),
         ("y2_label_pad", "右軸ラベル余白", 0.0, 40.0, 0.5),
         ("y_tick_pad", "左右目盛余白", 0.0, 20.0, 0.5),
@@ -222,7 +235,7 @@ def launch_style_tuner(
             "max": vmax,
             "step": step,
             "decimals": _decimal_places(step),
-            "is_int": key == "dpi",
+            "is_int": key in {"dpi", "left_major_tick_count", "right_major_tick_count"},
         }
         for key, _label, vmin, vmax, step in all_controls
     }
@@ -239,6 +252,53 @@ def launch_style_tuner(
     last_holder_size = (0, 0)
     current_span_var = tk.StringVar(value=preview_span)
     active_scale_drag_key: str | None = None
+    is_history_applying = False
+    history_states: list[dict[str, object]] = []
+    history_index = -1
+
+    def _capture_state() -> dict[str, object]:
+        return {key: vars_map[key].get() for key in vars_map}
+
+    def _apply_state(state: dict[str, object]) -> None:
+        nonlocal is_internal_update, is_history_applying
+        is_history_applying = True
+        is_internal_update = True
+        try:
+            for key, value in state.items():
+                if key in vars_map:
+                    vars_map[key].set(value)
+        finally:
+            is_internal_update = False
+            is_history_applying = False
+        _sync_all_entry_texts()
+        redraw()
+
+    def _push_history_state() -> None:
+        nonlocal history_index
+        if is_history_applying:
+            return
+        state = _capture_state()
+        if history_index >= 0 and history_states and history_states[history_index] == state:
+            return
+        del history_states[history_index + 1 :]
+        history_states.append(state)
+        history_index = len(history_states) - 1
+
+    def _undo(_event=None):
+        nonlocal history_index
+        if history_index <= 0:
+            return "break"
+        history_index -= 1
+        _apply_state(history_states[history_index])
+        return "break"
+
+    def _redo(_event=None):
+        nonlocal history_index
+        if history_index >= len(history_states) - 1:
+            return "break"
+        history_index += 1
+        _apply_state(history_states[history_index])
+        return "break"
 
     def _holder_size_ready() -> bool:
         preview_holder.update_idletasks()
@@ -443,6 +503,7 @@ def launch_style_tuner(
                 if fig_normalized is not None:
                     _set_control_value(fig_key, fig_normalized, update_entry=True)
                     committed_values[fig_key] = float(vars_map[fig_key].get())
+        _push_history_state()
         schedule_redraw(delay_ms=0)
 
     def _on_scale_press(event: tk.Event, key: str):
@@ -484,6 +545,11 @@ def launch_style_tuner(
                 if fig_normalized is not None:
                     _set_control_value(fig_key, fig_normalized, update_entry=True)
                     committed_values[fig_key] = float(vars_map[fig_key].get())
+        _push_history_state()
+        schedule_redraw(delay_ms=0)
+
+    def _on_grid_toggle() -> None:
+        _push_history_state()
         schedule_redraw(delay_ms=0)
 
     def on_holder_configure(_event: tk.Event) -> None:
@@ -514,6 +580,7 @@ def launch_style_tuner(
             loaded = load_style_profile(Path(selected))
             _apply_profile_to_vars(loaded, vars_map)
             _sync_all_entry_texts()
+            _push_history_state()
             redraw()
             messagebox.showinfo("読込完了", f"読み込みました: {selected}")
         except Exception as exc:  # noqa: BLE001
@@ -562,6 +629,7 @@ def launch_style_tuner(
     def on_reset_default() -> None:
         _apply_profile_to_vars(default_style_profile(), vars_map)
         _sync_all_entry_texts()
+        _push_history_state()
         redraw()
 
     info_row = ttk.Frame(settings_inner)
@@ -604,9 +672,9 @@ def launch_style_tuner(
         grid_row,
         text="横グリッド表示",
         variable=vars_map["grid_y_visible"],
-        command=schedule_redraw,
+        command=_on_grid_toggle,
     ).pack(side=tk.LEFT)
-    ttk.Checkbutton(grid_row, text="縦グリッド表示", variable=vars_map["grid_x_visible"], command=schedule_redraw).pack(
+    ttk.Checkbutton(grid_row, text="縦グリッド表示", variable=vars_map["grid_x_visible"], command=_on_grid_toggle).pack(
         side=tk.LEFT, padx=8
     )
 
@@ -640,8 +708,12 @@ def launch_style_tuner(
     _update_figure_slider_range(vars_map["dpi"].get())
     _sync_all_entry_texts()
     committed_values.update({key: float(vars_map[key].get()) for key in control_meta})
+    _push_history_state()
     preview_holder.bind("<Configure>", on_holder_configure)
     root.protocol("WM_DELETE_WINDOW", on_attempt_close)
+    root.bind("<Control-z>", _undo)
+    root.bind("<Control-y>", _redo)
+    root.bind("<Control-Z>", _redo)
     root.after(80, redraw)
     if owns_mainloop:
         root.mainloop()

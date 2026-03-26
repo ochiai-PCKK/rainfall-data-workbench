@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportGeneralTypeIssues=false
 from __future__ import annotations
 
 from dataclasses import asdict

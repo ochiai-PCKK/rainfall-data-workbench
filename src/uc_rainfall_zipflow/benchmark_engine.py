@@ -1,13 +1,12 @@
-from __future__ import annotations
-
 """Python / Rust(subprocess) / Rust(PyO3) の比較ベンチ実行モジュール。
 
 本モジュールは、まず比較基盤を独立で進化させるために
 `application.py` とは切り離して実装している。
 """
+from __future__ import annotations
 
-import ctypes
 import csv
+import ctypes
 import importlib
 import json
 import math
@@ -79,7 +78,9 @@ def _process_rss_bytes(pid: int) -> int:
         k32.CloseHandle(handle)
 
 
-def _run_with_self_memory_probe(fn: Callable[[], dict[str, np.ndarray]]) -> tuple[dict[str, np.ndarray], float, float, float]:
+def _run_with_self_memory_probe(
+    fn: Callable[[], dict[str, np.ndarray]],
+) -> tuple[dict[str, np.ndarray], float, float, float]:
     """関数実行中にRSSをポーリングし、結果・時間・ピークRSSを返す。"""
 
     peak = 0
@@ -147,7 +148,7 @@ def _to_nullable_list(values: np.ndarray) -> list[float | None]:
     return out
 
 
-def _from_nullable_list(values: list[float | None]) -> np.ndarray:
+def _from_nullable_list(values: list[float | None] | np.ndarray) -> np.ndarray:
     """JSON互換リストをfloat配列へ戻す（None -> NaN）。"""
 
     return np.array([np.nan if v is None else float(v) for v in values], dtype=np.float64)

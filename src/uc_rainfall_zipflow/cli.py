@@ -4,6 +4,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 from .application import run_zipflow
 from .benchmark_engine import run_core_benchmark
@@ -282,17 +283,21 @@ def main() -> None:
                 force_rebuild_pyo3=bool(args.rebuild_pyo3),
             )
             print(result["output_dir"])
+            summary = cast(dict[str, Any], result["summary"])
             line = (
                 "speed_score={:.4f} memory_score={:.4f} total_score={:.4f} accuracy_passed={}".format(
-                    result["summary"]["speed_score"],
-                    result["summary"]["memory_score"],
-                    result["summary"]["total_score"],
-                    result["summary"]["accuracy"]["passed"],
+                    summary["speed_score"],
+                    summary["memory_score"],
+                    summary["total_score"],
+                    summary["accuracy"]["passed"],
                 )
             )
-            if result["summary"].get("rust_pyo3"):
-                pyo3 = result["summary"]["rust_pyo3"]
-                line += " | pyo3_speed_score={:.4f} pyo3_memory_score={:.4f} pyo3_total_score={:.4f} pyo3_accuracy_passed={}".format(
+            if summary.get("rust_pyo3"):
+                pyo3 = cast(dict[str, Any], summary["rust_pyo3"])
+                line += (
+                    " | pyo3_speed_score={:.4f} pyo3_memory_score={:.4f} "
+                    "pyo3_total_score={:.4f} pyo3_accuracy_passed={}"
+                ).format(
                     pyo3["speed_score"],
                     pyo3["memory_score"],
                     pyo3["total_score"],

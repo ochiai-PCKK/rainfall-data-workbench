@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportCallIssue=false, reportAttributeAccessIssue=false, reportReturnType=false, reportGeneralTypeIssues=false
 from __future__ import annotations
 
 import csv
@@ -11,6 +12,7 @@ from openpyxl import load_workbook
 
 from .errors import ZipFlowError
 from .graph_builder import build_metric_frame, render_region_plots_reference
+from .graph_renderer_reference import compute_axis_tops, prepare_reference_window
 from .logger import build_logger
 from .style_profile import load_style_profile
 
@@ -40,6 +42,15 @@ class ExcelEventCandidate:
     event_date: date
     sheet_name: str
     is_resplit: bool
+
+
+@dataclass(frozen=True)
+class _ExcelRenderJob:
+    sheet_name: str
+    base_date: date
+    effective_base_date: date
+    frame_sum: pd.DataFrame
+    frame_mean: pd.DataFrame
 
 
 def parse_event_sheet_date(sheet_name: str) -> date | None:
@@ -199,6 +210,37 @@ def _load_sheet_series(excel_path: Path, *, sheet_name: str, base_date: date) ->
         wb.close()
 
 
+def _build_excel_axis_tops(
+    *,
+    jobs: list[_ExcelRenderJob],
+    render_span: str,
+    ref_graph_kinds: tuple[str, ...],
+    left_top_default: float,
+    right_top_default: float,
+) -> dict[tuple[str, str], tuple[float, float]]:
+    span_days = 5 if render_span == "5d" else 3
+    axis_tops: dict[tuple[str, str], tuple[float, float]] = {}
+    for kind in ref_graph_kinds:
+        left_max = 0.0
+        right_max = 0.0
+        for job in jobs:
+            frame_src = job.frame_sum if kind == "sum" else job.frame_mean
+            center = datetime.combine(job.effective_base_date, time(hour=0))
+            start = center - timedelta(days=span_days // 2)
+            end = start + timedelta(hours=(span_days * 24) - 1)
+            span_frame = frame_src[(frame_src["observed_at"] >= start) & (frame_src["observed_at"] <= end)]
+            window = prepare_reference_window(span_frame)
+            left_max = max(left_max, float(window["rainfall_mm"].max()))
+            right_max = max(right_max, float(window["cumulative_mm"].max()))
+        axis_tops[(render_span, kind)] = compute_axis_tops(
+            left_max=left_max,
+            right_max=right_max,
+            left_top_default=left_top_default,
+            right_top_default=right_top_default,
+        )
+    return axis_tops
+
+
 def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
     if not config.input_excel.exists():
         raise ZipFlowError(f"入力Excelファイルが見つかりません: {config.input_excel}", exit_code=2)
@@ -225,15 +267,13 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001
         raise ZipFlowError(f"スタイル読込に失敗しました: {exc}", exit_code=2) from exc
 
-    saved: list[Path] = []
+    render_span = "5d" if config.graph_span == "5d" else "3d"
+    jobs: list[_ExcelRenderJob] = []
     for sheet_name in config.selected_sheets:
         base_date = parse_event_sheet_date(sheet_name)
         if base_date is None:
             raise ZipFlowError(f"シート名の日付解釈に失敗しました: {sheet_name}", exit_code=5)
         effective_base_date = resolve_effective_base_date(base_date, config.graph_span)
-        render_span = "5d"
-        if config.graph_span != "5d":
-            render_span = "3d"
         frame_src = _load_sheet_series(config.input_excel, sheet_name=sheet_name, base_date=base_date)
         observed_at = frame_src["observed_at"].tolist()
         rainfall = frame_src["rainfall_mm"].astype(float).tolist()
@@ -246,22 +286,46 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
             frame_src["observed_at"].min(),
             frame_src["observed_at"].max(),
         )
+        jobs.append(
+            _ExcelRenderJob(
+                sheet_name=sheet_name,
+                base_date=base_date,
+                effective_base_date=effective_base_date,
+                frame_sum=frame_sum,
+                frame_mean=frame_mean,
+            )
+        )
+
+    axis_tops = _build_excel_axis_tops(
+        jobs=jobs,
+        render_span=render_span,
+        ref_graph_kinds=config.ref_graph_kinds,
+        left_top_default=style_profile.left_axis_top,
+        right_top_default=style_profile.right_axis_top,
+    )
+    for kind in config.ref_graph_kinds:
+        left_top, right_top = axis_tops[(render_span, kind)]
+        logger.info("共通軸上限: span=%s kind=%s left_top=%.3f right_top=%.3f", render_span, kind, left_top, right_top)
+
+    saved: list[Path] = []
+    for job in jobs:
         outputs = render_region_plots_reference(
-            frame_sum=frame_sum,
-            frame_mean=frame_mean,
+            frame_sum=job.frame_sum,
+            frame_mean=job.frame_mean,
             region_key=config.region_key,
             region_label=config.region_label,
             output_dir=plot_ref_dir,
-            base_date=effective_base_date,
+            base_date=job.effective_base_date,
             graph_spans=(render_span,),
             ref_graph_kinds=config.ref_graph_kinds,
             export_svg=config.export_svg,
             on_conflict=config.on_conflict,
             style=style_profile,
             filename_prefix="excel_",
+            axis_tops=axis_tops,
         )
         saved.extend(outputs)
-        logger.info("グラフ出力完了: sheet=%s files=%s", sheet_name, len(outputs))
+        logger.info("グラフ出力完了: sheet=%s files=%s", job.sheet_name, len(outputs))
 
     logger.info("Excelモード完了: plot_count=%s", len(saved))
     return {

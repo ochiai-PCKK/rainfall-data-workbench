@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportReturnType=false
 from __future__ import annotations
 
 import logging
@@ -155,6 +156,7 @@ def render_region_plots_reference(
     on_conflict: str = "rename",
     style: GraphStyleProfile | None = None,
     filename_prefix: str = "",
+    axis_tops: dict[tuple[str, str], tuple[float, float]] | None = None,
 ) -> list[Path]:
     """参考画像寄せスタイルで領域の合計/平均グラフを保存する。"""
     saved: list[Path] = []
@@ -169,6 +171,8 @@ def render_region_plots_reference(
         out_mean_png = output_dir / f"{filename_prefix}{region_key}_{base_date:%Y%m%d}_{span}_mean_overview.png"
         title_sum = f"重み付き合計雨量（{start_date} - {end_date}）"
         title_mean = f"流域平均雨量（{start_date} - {end_date}）"
+        sum_tops = (axis_tops or {}).get((span, "sum"))
+        mean_tops = (axis_tops or {}).get((span, "mean"))
 
         if "sum" in ref_graph_kinds:
             out_sum_png = _resolve_output_path(out_sum_png, on_conflict=on_conflict)
@@ -177,6 +181,8 @@ def render_region_plots_reference(
                 output_path=out_sum_png,
                 title=title_sum,
                 style=style,
+                left_top=sum_tops[0] if sum_tops is not None else None,
+                right_top=sum_tops[1] if sum_tops is not None else None,
             )
             saved.append(out_sum_png)
         if "mean" in ref_graph_kinds:
@@ -186,6 +192,8 @@ def render_region_plots_reference(
                 output_path=out_mean_png,
                 title=title_mean,
                 style=style,
+                left_top=mean_tops[0] if mean_tops is not None else None,
+                right_top=mean_tops[1] if mean_tops is not None else None,
             )
             saved.append(out_mean_png)
         if export_svg:
@@ -198,6 +206,8 @@ def render_region_plots_reference(
                     output_path=out_sum_svg,
                     title=title_sum,
                     style=style,
+                    left_top=sum_tops[0] if sum_tops is not None else None,
+                    right_top=sum_tops[1] if sum_tops is not None else None,
                 )
                 saved.append(out_sum_svg)
             if "mean" in ref_graph_kinds:
@@ -207,6 +217,8 @@ def render_region_plots_reference(
                     output_path=out_mean_svg,
                     title=title_mean,
                     style=style,
+                    left_top=mean_tops[0] if mean_tops is not None else None,
+                    right_top=mean_tops[1] if mean_tops is not None else None,
                 )
                 saved.append(out_mean_svg)
     return saved

@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 """重み付き集計の実行エンジン切替（python / rust_pyo3）。"""
+from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass

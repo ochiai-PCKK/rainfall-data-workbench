@@ -25,6 +25,12 @@ class GraphStyleProfile:
     y2_label_pad: float = 16.0
     y_tick_pad: float = 4.0
     tick_fontsize: float = 8.0
+    left_axis_top: float = 60.0
+    right_axis_top: float = 300.0
+    left_major_tick_count: int = 7
+    right_major_tick_count: int = 7
+    left_major_tick_step: float = 10.0
+    right_major_tick_step: float = 50.0
     line_width: float = 2.7
     bar_width_hours: float = 0.96
     bar_edge_linewidth: float = 0.4

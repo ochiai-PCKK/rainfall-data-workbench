@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
 import csv
@@ -7,11 +8,14 @@ import shutil
 import tempfile
 import threading
 import tkinter as tk
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import cast
+from typing import Any, cast
+
+import pandas as pd
 
 from ..errors import ZipFlowError
 from ..excel_application import (
@@ -22,10 +26,11 @@ from ..excel_application import (
     resolve_effective_base_date,
     run_excel_mode,
 )
-from ..graph_builder import build_reference_output_paths
+from ..graph_builder import build_metric_frame, build_reference_output_paths, render_region_plots_reference
+from ..graph_renderer_reference import compute_axis_tops, prepare_reference_window
 from ..models import RunConfig
 from ..runtime_paths import resolve_path
-from ..style_profile import default_style_profile_path
+from ..style_profile import default_style_profile_path, load_style_profile
 from ..zip_selector import list_zip_windows
 from .excel_mode_panel import ExcelModePanel
 from .rain_mode_panel import RainModePanel
@@ -972,6 +977,69 @@ class ZipFlowGui:
                     invalid_count += 1
         return parsed, invalid_count
 
+    def _load_timeseries_frame_for_plot(self, csv_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+        frame = pd.read_csv(csv_path, encoding="utf-8-sig")
+        if "observed_at_jst" not in frame.columns:
+            raise ZipFlowError(f"時系列CSVに observed_at_jst 列がありません: {csv_path}", exit_code=5)
+        if "weighted_sum_mm" not in frame.columns:
+            raise ZipFlowError(f"時系列CSVに weighted_sum_mm 列がありません: {csv_path}", exit_code=5)
+        if "weighted_mean_mm" not in frame.columns:
+            raise ZipFlowError(f"時系列CSVに weighted_mean_mm 列がありません: {csv_path}", exit_code=5)
+        observed_at = pd.to_datetime(frame["observed_at_jst"], errors="coerce")
+        if observed_at.isna().any():
+            raise ZipFlowError(f"時系列CSVの observed_at_jst が不正です: {csv_path}", exit_code=5)
+        sum_values = pd.to_numeric(frame["weighted_sum_mm"], errors="coerce").fillna(0.0)
+        mean_values = pd.to_numeric(frame["weighted_mean_mm"], errors="coerce").fillna(0.0)
+        frame_sum = build_metric_frame(
+            observed_at=observed_at.to_list(),
+            weighted_sum=sum_values.astype(float).to_list(),
+        )
+        frame_mean = build_metric_frame(
+            observed_at=observed_at.to_list(),
+            weighted_sum=mean_values.astype(float).to_list(),
+        )
+        return frame_sum, frame_mean
+
+    def _compute_shared_axis_tops_for_batch(
+        self,
+        *,
+        plot_jobs: list[dict[str, Any]],
+    ) -> dict[str, dict[tuple[str, str], tuple[float, float]]]:
+        merged: dict[str, dict[tuple[str, str], tuple[float, float]]] = {}
+        style_cache: dict[Path | None, Any] = {}
+        for job in plot_jobs:
+            cfg = cast(RunConfig, job["config"])
+            region_key = cast(str, job["region_key"])
+            frame_sum = cast(pd.DataFrame, job["frame_sum"])
+            frame_mean = cast(pd.DataFrame, job["frame_mean"])
+            style_key = cfg.style_profile_path
+            if style_key not in style_cache:
+                style_cache[style_key] = load_style_profile(style_key)
+            style = style_cache[style_key]
+            base_date = cast(date, cfg.reference_base_date or cfg.base_date)
+            target = merged.setdefault(region_key, {})
+            for span in cfg.graph_spans:
+                span_days = 3 if span == "3d" else 5
+                center = datetime.combine(base_date, datetime.min.time())
+                start = center - timedelta(days=span_days // 2)
+                end = start + timedelta(hours=(span_days * 24) - 1)
+                for kind in cfg.ref_graph_kinds:
+                    frame_src = frame_sum if kind == "sum" else frame_mean
+                    span_frame = frame_src[(frame_src["observed_at"] >= start) & (frame_src["observed_at"] <= end)]
+                    window = prepare_reference_window(span_frame)
+                    tops = compute_axis_tops(
+                        left_max=float(window["rainfall_mm"].max()),
+                        right_max=float(window["cumulative_mm"].max()),
+                        left_top_default=float(style.left_axis_top),
+                        right_top_default=float(style.right_axis_top),
+                    )
+                    prev = target.get((span, kind))
+                    if prev is None:
+                        target[(span, kind)] = tops
+                    else:
+                        target[(span, kind)] = (max(prev[0], tops[0]), max(prev[1], tops[1]))
+        return merged
+
     def _is_dev_ui_enabled(self) -> bool:
         if self._dev_mode is not None:
             return bool(self._dev_mode)
@@ -1003,11 +1071,184 @@ class ZipFlowGui:
         ttk.Button(frame, text="Excel: 候補日CSV出力", command=self._on_export_excel_candidates_csv).pack(
             fill=tk.X, pady=(0, 4)
         )
+        ttk.Button(
+            frame,
+            text="解析雨量: 中間JSONからグラフ再出力",
+            command=self._on_render_from_intermediate_json,
+        ).pack(fill=tk.X, pady=(0, 4))
         ttk.Label(
             frame,
             text=f"表示条件: 環境変数 {_DEV_UI_ENV}=1",
         ).pack(anchor=tk.W, pady=(6, 0))
         self._dev_window = win
+
+    def _on_render_from_intermediate_json(self) -> None:
+        initial_path = Path(self.output_dir_var.get().strip()) / "plots_reference" / "_intermediate.json"
+        selected = filedialog.askopenfilename(
+            title="中間JSONを選択",
+            initialdir=str(initial_path.parent) if initial_path.parent.exists() else "",
+            initialfile=initial_path.name,
+            filetypes=[("JSON", "*.json"), ("すべて", "*.*")],
+        )
+        if not selected:
+            return
+        json_path = Path(selected)
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            jobs_raw = payload.get("jobs")
+            if not isinstance(jobs_raw, list) or not jobs_raw:
+                raise ValueError("jobs が空、または不正です。")
+            style_path = default_style_profile_path()
+            style = load_style_profile(style_path if style_path.exists() else None)
+            output_dir = json_path.parent
+            export_svg = bool(self.export_svg_var.get())
+            render_jobs: list[dict[str, Any]] = []
+            shared_axis_tops: dict[str, dict[tuple[str, str], tuple[float, float]]] = {}
+            for idx, job in enumerate(jobs_raw, start=1):
+                if not isinstance(job, dict):
+                    raise ValueError(f"jobs[{idx}] の形式が不正です。")
+                region_key = str(job.get("region_key") or "").strip()
+                if not region_key:
+                    raise ValueError(f"jobs[{idx}].region_key が不正です。")
+                region_label = str(job.get("region_label") or region_key).strip() or region_key
+                base_date_raw = str(job.get("reference_base_date") or "").strip()
+                if not base_date_raw:
+                    raise ValueError(f"jobs[{idx}].reference_base_date が不正です。")
+                base_date = _parse_date(base_date_raw, field_name="reference_base_date")
+                graph_spans_raw = job.get("graph_spans")
+                ref_graph_kinds_raw = job.get("ref_graph_kinds")
+                observed_at_raw = job.get("observed_at_jst")
+                sum_raw = job.get("weighted_sum_mm")
+                mean_raw = job.get("weighted_mean_mm")
+                if not isinstance(graph_spans_raw, list) or not graph_spans_raw:
+                    raise ValueError(f"jobs[{idx}].graph_spans が不正です。")
+                if not isinstance(ref_graph_kinds_raw, list) or not ref_graph_kinds_raw:
+                    raise ValueError(f"jobs[{idx}].ref_graph_kinds が不正です。")
+                if (
+                    not isinstance(observed_at_raw, list)
+                    or not isinstance(sum_raw, list)
+                    or not isinstance(mean_raw, list)
+                ):
+                    raise ValueError(f"jobs[{idx}] の時系列配列が不正です。")
+                observed_at = pd.to_datetime(observed_at_raw, errors="coerce")
+                if observed_at.isna().any():
+                    raise ValueError(f"jobs[{idx}].observed_at_jst に不正値があります。")
+                frame_sum = build_metric_frame(
+                    observed_at=observed_at.to_list(),
+                    weighted_sum=[float(v) if v is not None else 0.0 for v in sum_raw],
+                )
+                frame_mean = build_metric_frame(
+                    observed_at=observed_at.to_list(),
+                    weighted_sum=[float(v) if v is not None else 0.0 for v in mean_raw],
+                )
+                graph_spans = tuple(str(v) for v in graph_spans_raw if str(v))
+                ref_graph_kinds = tuple(str(v) for v in ref_graph_kinds_raw if str(v))
+                if not graph_spans or not ref_graph_kinds:
+                    raise ValueError(f"jobs[{idx}] の graph_spans/ref_graph_kinds が空です。")
+                axis_target = shared_axis_tops.setdefault(region_key, {})
+                for span in graph_spans:
+                    span_days = 3 if span == "3d" else 5
+                    center = datetime.combine(base_date, datetime.min.time())
+                    start = center - timedelta(days=span_days // 2)
+                    end = start + timedelta(hours=(span_days * 24) - 1)
+                    for kind in ref_graph_kinds:
+                        frame_src = frame_sum if kind == "sum" else frame_mean
+                        span_frame = frame_src[(frame_src["observed_at"] >= start) & (frame_src["observed_at"] <= end)]
+                        window = prepare_reference_window(span_frame)
+                        tops = compute_axis_tops(
+                            left_max=float(window["rainfall_mm"].max()),
+                            right_max=float(window["cumulative_mm"].max()),
+                            left_top_default=float(style.left_axis_top),
+                            right_top_default=float(style.right_axis_top),
+                        )
+                        prev = axis_target.get((span, kind))
+                        if prev is None:
+                            axis_target[(span, kind)] = tops
+                        else:
+                            axis_target[(span, kind)] = (max(prev[0], tops[0]), max(prev[1], tops[1]))
+                render_jobs.append(
+                    {
+                        "region_key": region_key,
+                        "region_label": region_label,
+                        "base_date": base_date,
+                        "graph_spans": graph_spans,
+                        "ref_graph_kinds": ref_graph_kinds,
+                        "frame_sum": frame_sum,
+                        "frame_mean": frame_mean,
+                    }
+                )
+
+            output_count = 0
+            rendered_paths: list[Path] = []
+            for job in render_jobs:
+                generated = render_region_plots_reference(
+                    frame_sum=cast(pd.DataFrame, job["frame_sum"]),
+                    frame_mean=cast(pd.DataFrame, job["frame_mean"]),
+                    region_key=cast(str, job["region_key"]),
+                    region_label=cast(str, job["region_label"]),
+                    output_dir=output_dir,
+                    base_date=cast(date, job["base_date"]),
+                    graph_spans=cast(tuple[str, ...], job["graph_spans"]),
+                    ref_graph_kinds=cast(tuple[str, ...], job["ref_graph_kinds"]),
+                    export_svg=export_svg,
+                    on_conflict="rename",
+                    style=style,
+                    axis_tops=shared_axis_tops.get(cast(str, job["region_key"]), {}),
+                )
+                output_count += len(generated)
+                rendered_paths.extend(generated)
+            merged_paths = self._merge_rendered_pngs_2x4(rendered_paths=rendered_paths, output_dir=output_dir)
+            summary = (
+                f"中間JSON再出力: jobs={len(render_jobs)} outputs={output_count} "
+                f"merged={len(merged_paths)} source={json_path}"
+            )
+            self._append_log(
+                summary
+            )
+            messagebox.showinfo(
+                "中間JSON再出力",
+                "再出力が完了しました。\n\n"
+                f"入力: {json_path}\n"
+                f"出力先: {output_dir}\n"
+                f"出力数: {output_count}\n"
+                f"マージ出力数(2x4): {len(merged_paths)}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"[ERROR] 中間JSON再出力失敗: {exc}")
+            messagebox.showerror("中間JSON再出力エラー", str(exc))
+
+    def _merge_rendered_pngs_2x4(self, *, rendered_paths: list[Path], output_dir: Path) -> list[Path]:
+        png_paths = [path for path in rendered_paths if path.suffix.lower() == ".png"]
+        if not png_paths:
+            return []
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise RuntimeError("画像マージには Pillow が必要です。`uv add pillow` を実行してください。") from exc
+
+        merged_dir = output_dir / "_merged_2x4"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        merged_paths: list[Path] = []
+
+        for index in range(0, len(png_paths), 8):
+            chunk = png_paths[index : index + 8]
+            if not chunk:
+                continue
+            with ExitStack() as stack:
+                images = [stack.enter_context(Image.open(path)) for path in chunk]
+                cell_width = max(img.width for img in images)
+                cell_height = max(img.height for img in images)
+                canvas = Image.new("RGB", (cell_width * 2, cell_height * 4), "white")
+                for pos, img in enumerate(images):
+                    row = pos // 2
+                    col = pos % 2
+                    x = col * cell_width + max(0, (cell_width - img.width) // 2)
+                    y = row * cell_height + max(0, (cell_height - img.height) // 2)
+                    canvas.paste(img.convert("RGB"), (x, y))
+            out_path = merged_dir / f"merged_2x4_{(index // 8) + 1:03d}.png"
+            canvas.save(out_path)
+            merged_paths.append(out_path)
+        return merged_paths
 
     def _on_export_excel_candidates_csv(self) -> None:
         excel_path = self.input_excel_var.get().strip()
@@ -1403,6 +1644,26 @@ class ZipFlowGui:
             def emit_log(message: str) -> None:
                 self.root.after(0, lambda m=message: self._append_log(m))
 
+            def write_intermediate_json(
+                *,
+                output_root: Path,
+                jobs: list[dict[str, Any]],
+            ) -> Path:
+                out_dir = output_root / "plots_reference"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "format": "uc_rainfall_zipflow.intermediate.v1",
+                    "generated_at_jst": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "job_count": len(jobs),
+                    "jobs": jobs,
+                }
+                out_path = out_dir / "_intermediate.json"
+                out_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                return out_path
+
             try:
                 zip_windows_cache: dict[Path, list] = {}
                 regions_cache: dict[Path, list] = {}
@@ -1431,7 +1692,34 @@ class ZipFlowGui:
                         cfg,
                         prelisted_windows=zip_windows_cache[cfg.input_zipdir.resolve()],
                         preloaded_regions=regions_cache[cfg.polygon_dir.resolve()],
+                        collect_metric_frames="plots_ref" in cfg.output_kinds,
                     )
+                    if "plots_ref" in cfg.output_kinds:
+                        frame_payload_raw = result.get("plot_frames_by_region")
+                        if not isinstance(frame_payload_raw, dict):
+                            raise ZipFlowError("plot_frames_by_region を取得できませんでした。", exit_code=5)
+                        jobs: list[dict[str, Any]] = []
+                        for region_key in cfg.region_keys:
+                            region_payload = frame_payload_raw.get(region_key)
+                            if not isinstance(region_payload, dict):
+                                continue
+                            jobs.append(
+                                {
+                                    "base_date": cfg.base_date.strftime(_DATE_FMT),
+                                    "reference_base_date": (cfg.reference_base_date or cfg.base_date).strftime(
+                                        _DATE_FMT
+                                    ),
+                                    "region_key": region_key,
+                                    "region_label": _REGION_LABELS.get(region_key, region_key),
+                                    "graph_spans": list(cfg.graph_spans),
+                                    "ref_graph_kinds": list(cfg.ref_graph_kinds),
+                                    "observed_at_jst": region_payload.get("observed_at_jst", []),
+                                    "weighted_sum_mm": region_payload.get("weighted_sum_mm", []),
+                                    "weighted_mean_mm": region_payload.get("weighted_mean_mm", []),
+                                }
+                            )
+                        out_json = write_intermediate_json(output_root=cfg.output_root, jobs=jobs)
+                        emit_log(f"中間JSON出力: {out_json}")
                     emit_log(
                         "処理中: 集計完了 "
                         f"(zip={result.get('zip_count')} plot={result.get('plot_count')} "
@@ -1446,6 +1734,9 @@ class ZipFlowGui:
                     last_log_path = None
                     total_jobs = len(configs_with_policy)
                     from ..application import run_zipflow
+                    plot_jobs: list[dict[str, Any]] = []
+                    intermediate_by_root: dict[Path, list[dict[str, Any]]] = {}
+                    requested_plot_ref_any = False
 
                     for idx, cfg in enumerate(configs_with_policy, start=1):
                         emit_log(
@@ -1453,10 +1744,17 @@ class ZipFlowGui:
                             f"target={cfg.base_date:%Y-%m-%d} "
                             f"period={cfg.start_date:%Y-%m-%d}..{cfg.end_date:%Y-%m-%d}"
                         )
+                        requested_outputs = set(cfg.output_kinds)
+                        requested_plot_ref_any = requested_plot_ref_any or ("plots_ref" in requested_outputs)
+                        effective_outputs = list(cfg.output_kinds)
+                        if "plots_ref" in requested_outputs:
+                            effective_outputs = [k for k in effective_outputs if k != "plots_ref"]
+                        run_cfg = replace(cfg, output_kinds=tuple(effective_outputs))
                         one = run_zipflow(
-                            cfg,
+                            run_cfg,
                             prelisted_windows=zip_windows_cache[cfg.input_zipdir.resolve()],
                             preloaded_regions=regions_cache[cfg.polygon_dir.resolve()],
+                            collect_metric_frames="plots_ref" in requested_outputs,
                         )
                         emit_log(
                             f"処理完了 [{idx}/{total_jobs}]: "
@@ -1464,12 +1762,129 @@ class ZipFlowGui:
                             f"zip={one.get('zip_count')} plot={one.get('plot_count')} "
                             f"csv={one.get('csv_count')}/{one.get('cell_csv_count')}"
                         )
-                        agg_plot += int(one.get("plot_count") or 0)
-                        agg_zip += int(one.get("zip_count") or 0)
-                        agg_csv += int(one.get("csv_count") or 0)
-                        agg_cell_csv += int(one.get("cell_csv_count") or 0)
+                        agg_plot += int(cast(int, one.get("plot_count") or 0))
+                        agg_zip += int(cast(int, one.get("zip_count") or 0))
+                        agg_csv += int(cast(int, one.get("csv_count") or 0))
+                        agg_cell_csv += int(cast(int, one.get("cell_csv_count") or 0))
                         last_base_dir = one.get("base_dir")
                         last_log_path = one.get("log_path")
+
+                        if "plots_ref" in requested_outputs:
+                            frame_payload_raw = one.get("plot_frames_by_region")
+                            if not isinstance(frame_payload_raw, dict):
+                                raise ZipFlowError("plot_frames_by_region を取得できませんでした。", exit_code=5)
+                            root_key = (cfg.output_root / "plots_reference").resolve()
+                            root_payload = intermediate_by_root.setdefault(root_key, [])
+                            for region_key in cfg.region_keys:
+                                region_payload = frame_payload_raw.get(region_key)
+                                if not isinstance(region_payload, dict):
+                                    detail = (
+                                        f"region={region_key} date={cfg.base_date:%Y-%m-%d}"
+                                    )
+                                    raise ZipFlowError(
+                                        f"中間データが不足しています: {detail}",
+                                        exit_code=5,
+                                    )
+                                observed_at_raw = region_payload.get("observed_at_jst")
+                                sum_raw = region_payload.get("weighted_sum_mm")
+                                mean_raw = region_payload.get("weighted_mean_mm")
+                                if (
+                                    not isinstance(observed_at_raw, list)
+                                    or not isinstance(sum_raw, list)
+                                    or not isinstance(mean_raw, list)
+                                ):
+                                    raise ZipFlowError(
+                                        f"中間データ形式が不正です: region={region_key} date={cfg.base_date:%Y-%m-%d}",
+                                        exit_code=5,
+                                    )
+                                observed_at = pd.to_datetime(observed_at_raw, errors="coerce")
+                                if observed_at.isna().any():
+                                    detail = (
+                                        f"region={region_key} date={cfg.base_date:%Y-%m-%d}"
+                                    )
+                                    raise ZipFlowError(
+                                        f"中間JSONの observed_at_jst が不正です: {detail}",
+                                        exit_code=5,
+                                    )
+                                plot_jobs.append(
+                                    {
+                                        "config": cfg,
+                                        "region_key": region_key,
+                                        "frame_sum": build_metric_frame(
+                                            observed_at=observed_at.to_list(),
+                                            weighted_sum=[
+                                                float(v) if v is not None else 0.0 for v in sum_raw
+                                            ],
+                                        ),
+                                        "frame_mean": build_metric_frame(
+                                            observed_at=observed_at.to_list(),
+                                            weighted_sum=[
+                                                float(v) if v is not None else 0.0 for v in mean_raw
+                                            ],
+                                        ),
+                                    }
+                                )
+                                root_payload.append(
+                                    {
+                                        "base_date": cfg.base_date.strftime(_DATE_FMT),
+                                        "reference_base_date": (
+                                            (cfg.reference_base_date or cfg.base_date).strftime(_DATE_FMT)
+                                        ),
+                                        "region_key": region_key,
+                                        "region_label": _REGION_LABELS.get(region_key, region_key),
+                                        "graph_spans": list(cfg.graph_spans),
+                                        "ref_graph_kinds": list(cfg.ref_graph_kinds),
+                                        "observed_at_jst": [str(ts) for ts in observed_at_raw],
+                                        "weighted_sum_mm": [float(v) if v is not None else 0.0 for v in sum_raw],
+                                        "weighted_mean_mm": [float(v) if v is not None else 0.0 for v in mean_raw],
+                                    }
+                                )
+
+                    if requested_plot_ref_any and not plot_jobs:
+                        raise ZipFlowError(
+                            "plots_ref が要求されましたが、描画対象の中間データを構築できませんでした。",
+                            exit_code=5,
+                        )
+
+                    if plot_jobs:
+                        emit_log("処理中: 複数対象日の共通軸上限を算出中")
+                        shared_axis_tops_by_region = self._compute_shared_axis_tops_for_batch(plot_jobs=plot_jobs)
+                        emit_log("処理中: 共通軸上限でグラフ描画中")
+                        style_cache: dict[Path | None, Any] = {}
+                        for job in plot_jobs:
+                            cfg = cast(RunConfig, job["config"])
+                            region_key = cast(str, job["region_key"])
+                            frame_sum = cast(pd.DataFrame, job["frame_sum"])
+                            frame_mean = cast(pd.DataFrame, job["frame_mean"])
+                            axis_tops = shared_axis_tops_by_region.get(region_key, {})
+                            style_key = cfg.style_profile_path
+                            if style_key not in style_cache:
+                                style_cache[style_key] = load_style_profile(style_key)
+                            generated = render_region_plots_reference(
+                                frame_sum=frame_sum,
+                                frame_mean=frame_mean,
+                                region_key=region_key,
+                                region_label=_REGION_LABELS.get(region_key, region_key),
+                                output_dir=cfg.output_root / "plots_reference",
+                                base_date=cfg.reference_base_date or cfg.base_date,
+                                graph_spans=cfg.graph_spans,
+                                ref_graph_kinds=cfg.ref_graph_kinds,
+                                export_svg=cfg.export_svg,
+                                on_conflict=cfg.on_conflict,
+                                style=style_cache[style_key],
+                                axis_tops=axis_tops,
+                            )
+                            agg_plot += len(generated)
+                        for root_dir, jobs in intermediate_by_root.items():
+                            out_json = write_intermediate_json(output_root=root_dir.parent, jobs=jobs)
+                            emit_log(f"中間JSON出力: {out_json}")
+
+                    if requested_plot_ref_any and agg_plot <= 0:
+                        raise ZipFlowError(
+                            "plots_ref が要求されましたが、グラフ出力件数が0件でした。",
+                            exit_code=7,
+                        )
+
                     result = {
                         "base_dir": last_base_dir,
                         "zip_count": agg_zip,

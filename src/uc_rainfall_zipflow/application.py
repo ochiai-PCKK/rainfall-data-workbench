@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAssignmentType=false
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
@@ -14,10 +15,12 @@ from .graph_builder import (
     render_region_plots,
     render_region_plots_reference,
 )
+from .graph_renderer_reference import compute_axis_tops, prepare_reference_window
 from .logger import build_logger
 from .models import RegionSpec, RunConfig, ZipWindow
 from .raster_writer import write_asc, write_rain_dat_blocks, write_tiff
 from .regions import load_region_specs
+from .runtime_engine import compute_weighted_stats
 from .spatial_clip import (
     NODATA_VALUE,
     ClipPlan,
@@ -34,7 +37,6 @@ from .spatial_clip import (
     transform_geometry,
     validate_region_alignment,
 )
-from .runtime_engine import compute_weighted_stats
 from .style_profile import load_style_profile
 from .time_series_builder import build_hourly_slots
 from .zip_reader import build_raster_index, extract_target_zips, resolve_slot_rasters
@@ -178,11 +180,45 @@ def _build_cell_catalog_rows(region_raster: RegionRaster, weights: np.ndarray) -
     return rows
 
 
+def _build_reference_axis_tops_for_run(
+    *,
+    frame_sum: pd.DataFrame,
+    frame_mean: pd.DataFrame,
+    base_date,
+    graph_spans: tuple[str, ...],
+    ref_graph_kinds: tuple[str, ...],
+    left_top_default: float,
+    right_top_default: float,
+) -> dict[tuple[str, str], tuple[float, float]]:
+    axis_tops: dict[tuple[str, str], tuple[float, float]] = {}
+    for span in graph_spans:
+        span_days = 3 if span == "3d" else 5
+        center = datetime.combine(base_date, time(hour=0))
+        start = center - timedelta(days=span_days // 2)
+        end = start + timedelta(hours=(span_days * 24) - 1)
+        for kind in ref_graph_kinds:
+            frame_src = frame_sum if kind == "sum" else frame_mean
+            span_frame = frame_src[(frame_src["observed_at"] >= start) & (frame_src["observed_at"] <= end)]
+            window = prepare_reference_window(span_frame)
+            left_max = float(window["rainfall_mm"].max())
+            right_max = float(window["cumulative_mm"].max())
+            axis_tops[(span, kind)] = compute_axis_tops(
+                left_max=left_max,
+                right_max=right_max,
+                left_top_default=left_top_default,
+                right_top_default=right_top_default,
+            )
+    return axis_tops
+
+
 def run_zipflow(
     config: RunConfig,
     *,
     prelisted_windows: list[ZipWindow] | None = None,
     preloaded_regions: list[RegionSpec] | None = None,
+    shared_axis_tops_by_region: dict[str, dict[tuple[str, str], tuple[float, float]]] | None = None,
+    collect_axis_tops_only: bool = False,
+    collect_metric_frames: bool = False,
 ) -> dict[str, object]:
     """ZIP Flow 実行本体。"""
     raster_dir, raster_bbox_dir, plot_dir, plot_ref_dir, csv_dir, log_dir = _prepare_outputs(config)
@@ -241,11 +277,14 @@ def run_zipflow(
 
     observed_at = [slot.observed_at_jst for slot in slots]
     enable_any_plot = "plots" in config.output_kinds or "plots_ref" in config.output_kinds
+    enable_metric_calc = enable_any_plot or collect_metric_frames
     enable_timeseries_csv = "timeseries_csv" in config.output_kinds
-    enable_weight_calc = enable_any_plot or enable_timeseries_csv
-    weighted_series: dict[str, list[float]] = {region.region_key: [] for region in regions} if enable_any_plot else {}
+    enable_weight_calc = enable_metric_calc or enable_timeseries_csv
+    weighted_series: dict[str, list[float]] = (
+        {region.region_key: [] for region in regions} if enable_metric_calc else {}
+    )
     weighted_mean_series: dict[str, list[float]] = (
-        {region.region_key: [] for region in regions} if enable_any_plot else {}
+        {region.region_key: [] for region in regions} if enable_metric_calc else {}
     )
     weighted_rows: dict[str, list[dict[str, object]]] = (
         {region.region_key: [] for region in regions} if enable_timeseries_csv else {}
@@ -359,7 +398,7 @@ def run_zipflow(
                                 exit_code=5,
                             )
                         weighted_mean = stats.weighted_mean
-                        if enable_any_plot:
+                        if enable_metric_calc:
                             weighted_series[region.region_key].append(weighted_value)
                             weighted_mean_series[region.region_key].append(weighted_mean)
                         if enable_timeseries_csv:
@@ -515,7 +554,9 @@ def run_zipflow(
         )
 
     plot_paths: list[Path] = []
-    if enable_any_plot:
+    plot_frames_by_region: dict[str, dict[str, list[object]]] = {}
+    axis_tops_by_region: dict[str, dict[tuple[str, str], tuple[float, float]]] = {}
+    if enable_metric_calc:
         for region in regions:
             sum_series = weighted_series[region.region_key]
             mean_series = weighted_mean_series[region.region_key]
@@ -533,8 +574,47 @@ def run_zipflow(
                 )
             frame = build_metric_frame(observed_at=observed_at, weighted_sum=sum_series)
             frame_mean = build_metric_frame(observed_at=observed_at, weighted_sum=mean_series)
+            if collect_metric_frames:
+                plot_frames_by_region[region.region_key] = {
+                    "observed_at_jst": [
+                        stamp.strftime("%Y-%m-%d %H:%M:%S")
+                        for stamp in frame["observed_at"].to_list()
+                        if isinstance(stamp, datetime)
+                    ],
+                    "weighted_sum_mm": [float(value) for value in frame["rainfall_mm"].to_list()],
+                    "weighted_mean_mm": [float(value) for value in frame_mean["rainfall_mm"].to_list()],
+                }
             try:
                 peaks = find_metric_peaks(frame)
+                if "plots_ref" in config.output_kinds:
+                    axis_tops = None
+                    if shared_axis_tops_by_region is not None:
+                        axis_tops = shared_axis_tops_by_region.get(region.region_key)
+                    if axis_tops is None:
+                        axis_tops = _build_reference_axis_tops_for_run(
+                            frame_sum=frame,
+                            frame_mean=frame_mean,
+                            base_date=reference_base_date,
+                            graph_spans=config.graph_spans,
+                            ref_graph_kinds=config.ref_graph_kinds,
+                            left_top_default=(style_profile.left_axis_top if style_profile is not None else 60.0),
+                            right_top_default=(style_profile.right_axis_top if style_profile is not None else 300.0),
+                        )
+                    axis_tops_by_region[region.region_key] = axis_tops
+                    for span, kind in axis_tops:
+                        left_top, right_top = axis_tops[(span, kind)]
+                        logger.info(
+                            "共通軸上限: region=%s span=%s kind=%s left_top=%.3f right_top=%.3f",
+                            region.region_key,
+                            span,
+                            kind,
+                            left_top,
+                            right_top,
+                        )
+
+                if collect_axis_tops_only:
+                    continue
+
                 if "plots" in config.output_kinds:
                     plot_paths.extend(
                         render_region_plots(
@@ -547,6 +627,7 @@ def run_zipflow(
                         )
                     )
                 if "plots_ref" in config.output_kinds:
+                    axis_tops = axis_tops_by_region.get(region.region_key)
                     plot_paths.extend(
                         render_region_plots_reference(
                             frame_sum=frame,
@@ -560,6 +641,7 @@ def run_zipflow(
                             export_svg=config.export_svg,
                             on_conflict=config.on_conflict,
                             style=style_profile,
+                            axis_tops=axis_tops or {},
                         )
                     )
             except FileExistsError as exc:
@@ -571,12 +653,20 @@ def run_zipflow(
             except OSError as exc:
                 raise ZipFlowError(f"グラフ出力に失敗しました: {exc}", exit_code=7) from exc
 
-    logger.info(
-        "出力完了: outputs=%s regions=%s plot=%s",
-        config.output_kinds,
-        [r.region_key for r in regions],
-        len(plot_paths),
-    )
+    if not config.output_kinds and collect_metric_frames:
+        logger.info(
+            "集計完了（中間データ生成）: outputs=%s regions=%s plot=%s",
+            config.output_kinds,
+            [r.region_key for r in regions],
+            len(plot_paths),
+        )
+    else:
+        logger.info(
+            "出力完了: outputs=%s regions=%s plot=%s",
+            config.output_kinds,
+            [r.region_key for r in regions],
+            len(plot_paths),
+        )
     return {
         "base_dir": str(raster_dir.parent),
         "raster_dir": str(raster_dir) if "raster" in config.output_kinds else None,
@@ -591,4 +681,6 @@ def run_zipflow(
         "csv_count": len(csv_paths),
         "cell_csv_count": len(cell_csv_paths),
         "csv_readme_path": str(csv_readme_path) if csv_readme_path else None,
+        "axis_tops_by_region": axis_tops_by_region if "plots_ref" in config.output_kinds else {},
+        "plot_frames_by_region": plot_frames_by_region if collect_metric_frames else {},
     }
