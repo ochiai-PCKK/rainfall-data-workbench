@@ -16,6 +16,34 @@
 
 - なし
 
+## [0.3.0] - 2026-03-27
+
+### Added
+
+- 実行エンジン切替を追加。  
+  `cli run --engine` で `python` / `rust_pyo3` を選択可能にした。
+- 集計コア比較用の `benchmark` サブコマンドを追加。  
+  Python / Rust / （任意で）PyO3 の速度・メモリ・精度比較を出力できるようにした。
+- Rust 実装を追加。  
+  `rust/weighted_core`（ネイティブベンチ用）と `rust/weighted_core_pyo3`（Python拡張）を導入。
+- PyO3 拡張ビルド用スクリプト `scripts/pyo3_wheel.ps1` を追加。
+- 解析雨量グラフの中間データJSON出力を追加。  
+  `plots_reference/_intermediate.json` を出力し、後段の再描画に利用できるようにした。
+- 開発者ツールに「解析雨量: 中間JSONからグラフ再出力」を追加。  
+  中間JSONから再描画し、PNGの2x4マージ画像を生成できるようにした。
+
+### Changed
+
+- 複数対象日の参照グラフ（`plots_ref`）を、共通軸上限を算出して一貫したスケールで描画する方式に変更。
+- 軸上限計算・軸設定ロジックを見直し、スタイル調整時の挙動を改善。
+- リリース用 GitHub Actions（`.github/workflows/release.yml`）を強化。  
+  `uv sync` / PyInstaller / `Compress-Archive` にリトライ処理を追加し、失敗時の回復性を高めた。
+
+### Fixed
+
+- 参照グラフの軸アラインメント不整合を修正。  
+  単体テスト（`test_axis_alignment`）を追加して再発防止を行った。
+
 ## [0.2.0] - 2026-03-18
 
 ### Added
