@@ -32,11 +32,39 @@ def _decimal_places(step: float) -> int:
     return max(0, -int(exponent))
 
 
+def _format_tick_hours_list(hours: list[int]) -> str:
+    return ",".join(str(int(v)) for v in hours)
+
+
+def _parse_tick_hours_list(raw: str) -> list[int]:
+    items = [part.strip() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("時刻表示リストは1件以上指定してください。（例: 6,12,18）")
+    values: list[int] = []
+    for item in items:
+        try:
+            hour = int(item)
+        except ValueError as exc:
+            raise ValueError(f"時刻表示リストに整数以外が含まれています: {item}") from exc
+        if hour < 0 or hour > 23:
+            raise ValueError(f"時刻は0〜23で指定してください: {hour}")
+        values.append(hour)
+    if len(set(values)) != len(values):
+        raise ValueError("時刻表示リストに重複があります。")
+    return sorted(values)
+
+
 def _profile_from_vars(vars_map: dict[str, tk.Variable]) -> GraphStyleProfile:
     base = asdict(default_style_profile())
     payload: dict[str, object] = {}
     for key, default in base.items():
         value = vars_map[key].get()
+        if key == "x_tick_hours_list":
+            payload[key] = _parse_tick_hours_list(str(value))
+            continue
+        if key == "x_date_label_format":
+            payload[key] = str(value)
+            continue
         if isinstance(default, bool):
             payload[key] = bool(value)
         elif isinstance(default, int):
@@ -58,6 +86,9 @@ def _apply_profile_to_vars(profile: GraphStyleProfile, vars_map: dict[str, tk.Va
             continue
         if key == "grid_x_color":
             var.set(_GRID_X_FIXED_COLOR)
+            continue
+        if key == "x_tick_hours_list":
+            var.set(_format_tick_hours_list(profile.x_tick_hours_list))
             continue
         var.set(values[key])
 
@@ -170,6 +201,10 @@ def launch_style_tuner(
         "y2_label_pad": tk.DoubleVar(value=profile.y2_label_pad),
         "y_tick_pad": tk.DoubleVar(value=profile.y_tick_pad),
         "tick_fontsize": tk.DoubleVar(value=profile.tick_fontsize),
+        "x_tick_hours_list": tk.StringVar(value=_format_tick_hours_list(profile.x_tick_hours_list)),
+        "x_date_label_format": tk.StringVar(value=profile.x_date_label_format),
+        "x_margin_hours_left": tk.DoubleVar(value=profile.x_margin_hours_left),
+        "x_margin_hours_right": tk.DoubleVar(value=profile.x_margin_hours_right),
         "left_axis_top": tk.DoubleVar(value=profile.left_axis_top),
         "right_axis_top": tk.DoubleVar(value=profile.right_axis_top),
         "left_major_tick_count": tk.IntVar(value=profile.left_major_tick_count),
@@ -206,6 +241,8 @@ def launch_style_tuner(
         ("title_pad", "タイトル余白", 0.0, 30.0, 0.5),
         ("axis_label_fontsize", "軸ラベル文字サイズ", 4.0, 20.0, 0.5),
         ("tick_fontsize", "目盛文字サイズ", 3.0, 18.0, 0.5),
+        ("x_margin_hours_left", "X左余白(h)", 0.0, 6.0, 0.1),
+        ("x_margin_hours_right", "X右余白(h)", 0.0, 6.0, 0.1),
         ("left_axis_top", "左軸上限", 10.0, 200.0, 5.0),
         ("right_axis_top", "右軸上限", 50.0, 2000.0, 50.0),
         ("left_major_tick_count", "左主目盛数", 2.0, 15.0, 1.0),
@@ -255,6 +292,7 @@ def launch_style_tuner(
     is_history_applying = False
     history_states: list[dict[str, object]] = []
     history_index = -1
+    x_tick_hours_last_valid = _format_tick_hours_list(profile.x_tick_hours_list)
 
     def _capture_state() -> dict[str, object]:
         return {key: vars_map[key].get() for key in vars_map}
@@ -548,6 +586,27 @@ def launch_style_tuner(
         _push_history_state()
         schedule_redraw(delay_ms=0)
 
+    def _on_x_tick_hours_commit(_event=None) -> None:
+        nonlocal x_tick_hours_last_valid
+        raw = str(vars_map["x_tick_hours_list"].get()).strip()
+        try:
+            parsed = _parse_tick_hours_list(raw)
+        except ValueError as exc:
+            vars_map["x_tick_hours_list"].set(x_tick_hours_last_valid)
+            messagebox.showerror("入力エラー", str(exc))
+            return
+        normalized = _format_tick_hours_list(parsed)
+        vars_map["x_tick_hours_list"].set(normalized)
+        x_tick_hours_last_valid = normalized
+        _push_history_state()
+        schedule_redraw(delay_ms=0)
+
+    def _on_x_date_label_format_commit(_event=None) -> None:
+        raw = str(vars_map["x_date_label_format"].get()).strip()
+        vars_map["x_date_label_format"].set(raw if raw else "%Y.%m.%d")
+        _push_history_state()
+        schedule_redraw(delay_ms=0)
+
     def _on_grid_toggle() -> None:
         _push_history_state()
         schedule_redraw(delay_ms=0)
@@ -677,6 +736,24 @@ def launch_style_tuner(
     ttk.Checkbutton(grid_row, text="縦グリッド表示", variable=vars_map["grid_x_visible"], command=_on_grid_toggle).pack(
         side=tk.LEFT, padx=8
     )
+
+    x_axis_row = ttk.Frame(settings_inner)
+    x_axis_row.pack(fill=tk.X, pady=(4, 2))
+    ttk.Label(x_axis_row, text="時刻表示(0-23)", width=14).pack(side=tk.LEFT)
+    x_tick_entry = ttk.Entry(x_axis_row, width=18, textvariable=vars_map["x_tick_hours_list"])
+    x_tick_entry.pack(side=tk.LEFT, padx=(0, 8))
+    x_tick_entry.bind("<Return>", _on_x_tick_hours_commit)
+    x_tick_entry.bind("<FocusOut>", _on_x_tick_hours_commit)
+    ttk.Label(x_axis_row, text="例: 6,12,18").pack(side=tk.LEFT)
+
+    x_format_row = ttk.Frame(settings_inner)
+    x_format_row.pack(fill=tk.X, pady=(0, 6))
+    ttk.Label(x_format_row, text="日付表示書式", width=14).pack(side=tk.LEFT)
+    x_date_format_entry = ttk.Entry(x_format_row, width=18, textvariable=vars_map["x_date_label_format"])
+    x_date_format_entry.pack(side=tk.LEFT, padx=(0, 8))
+    x_date_format_entry.bind("<Return>", _on_x_date_label_format_commit)
+    x_date_format_entry.bind("<FocusOut>", _on_x_date_label_format_commit)
+    ttk.Label(x_format_row, text="例: %Y.%m.%d").pack(side=tk.LEFT)
 
     for key, label, vmin, vmax, _step in all_controls:
         frm = ttk.Frame(settings_inner)

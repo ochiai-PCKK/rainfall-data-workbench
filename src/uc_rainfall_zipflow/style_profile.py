@@ -1,11 +1,30 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .runtime_paths import resolve_path
+
+
+def _coerce_x_tick_hours_list(value: Any) -> list[int]:
+    values: list[int] = []
+    if isinstance(value, (list, tuple)):
+        source = value
+    elif isinstance(value, str):
+        source = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        source = []
+    for item in source:
+        try:
+            hour = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            values.append(hour)
+    unique_sorted = sorted(set(values))
+    return unique_sorted if unique_sorted else [6, 12, 18]
 
 
 @dataclass(frozen=True)
@@ -25,6 +44,10 @@ class GraphStyleProfile:
     y2_label_pad: float = 16.0
     y_tick_pad: float = 4.0
     tick_fontsize: float = 8.0
+    x_tick_hours_list: list[int] = field(default_factory=lambda: [6, 12, 18])
+    x_date_label_format: str = "%Y.%m.%d"
+    x_margin_hours_left: float = 0.5
+    x_margin_hours_right: float = 0.5
     left_axis_top: float = 60.0
     right_axis_top: float = 300.0
     left_major_tick_count: int = 7
@@ -86,6 +109,10 @@ def _coerce_profile(raw: dict[str, Any]) -> GraphStyleProfile:
             merged[key] = int(value)
         elif isinstance(default, float):
             merged[key] = float(value)
+        elif key == "x_tick_hours_list":
+            merged[key] = _coerce_x_tick_hours_list(value)
+        elif key == "x_date_label_format":
+            merged[key] = str(value)
         else:
             merged[key] = value
     return GraphStyleProfile(**merged)

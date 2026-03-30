@@ -308,6 +308,7 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         logger.info("共通軸上限: span=%s kind=%s left_top=%.3f right_top=%.3f", render_span, kind, left_top, right_top)
 
     saved: list[Path] = []
+    intermediate_jobs: list[dict[str, object]] = []
     for job in jobs:
         outputs = render_region_plots_reference(
             frame_sum=job.frame_sum,
@@ -326,6 +327,20 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         )
         saved.extend(outputs)
         logger.info("グラフ出力完了: sheet=%s files=%s", job.sheet_name, len(outputs))
+        intermediate_jobs.append(
+            {
+                "base_date": job.base_date.strftime("%Y-%m-%d"),
+                "reference_base_date": job.effective_base_date.strftime("%Y-%m-%d"),
+                "region_key": config.region_key,
+                "region_label": config.region_label,
+                "graph_spans": [render_span],
+                "ref_graph_kinds": list(config.ref_graph_kinds),
+                "observed_at_jst": [str(ts) for ts in job.frame_sum["observed_at"].tolist()],
+                "weighted_sum_mm": [float(v) for v in job.frame_sum["rainfall_mm"].tolist()],
+                "weighted_mean_mm": [float(v) for v in job.frame_mean["rainfall_mm"].tolist()],
+                "source_sheet_name": job.sheet_name,
+            }
+        )
 
     logger.info("Excelモード完了: plot_count=%s", len(saved))
     return {
@@ -338,4 +353,5 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         "cell_csv_count": 0,
         "csv_readme_path": None,
         "event_count": len(config.selected_sheets),
+        "intermediate_jobs": intermediate_jobs,
     }

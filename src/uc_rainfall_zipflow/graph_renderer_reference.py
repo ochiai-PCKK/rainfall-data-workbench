@@ -23,6 +23,11 @@ _DEFAULT_LEFT_TOP = 60.0
 _DEFAULT_RIGHT_TOP = 300.0
 
 
+def _resolve_tick_hours(values: list[int]) -> list[int]:
+    unique_sorted = sorted({int(v) for v in values if 0 <= int(v) <= 23})
+    return unique_sorted if unique_sorted else [6, 12, 18]
+
+
 def _ceil_nice(value: float, step: float) -> float:
     if value <= 0:
         return step
@@ -117,8 +122,10 @@ def draw_reference_chart(
     ax2 = ax1.twinx()
 
     times = window["observed_at"]
-    xmin = pd.Timestamp(times.min()) - pd.Timedelta(hours=0.5)
-    xmax = pd.Timestamp(times.max()) + pd.Timedelta(hours=0.5)
+    left_margin_hours = max(0.0, float(cfg.x_margin_hours_left))
+    right_margin_hours = max(0.0, float(cfg.x_margin_hours_right))
+    xmin = pd.Timestamp(times.min()) - pd.Timedelta(hours=left_margin_hours)
+    xmax = pd.Timestamp(times.max()) + pd.Timedelta(hours=right_margin_hours)
     ax1.bar(
         times,
         window["rainfall_mm"],
@@ -219,7 +226,8 @@ def draw_reference_chart(
     ax_tbl.spines["bottom"].set_visible(False)
 
     all_hours = pd.date_range(start_day, end_day, freq="h")
-    hour_ticks = [t for t in all_hours if t.hour in (3, 9, 15, 21) and xmin <= t <= xmax]
+    tick_hours = _resolve_tick_hours(cfg.x_tick_hours_list)
+    hour_ticks = [t for t in all_hours if t.hour in tick_hours and xmin <= t <= xmax]
     for tick in hour_ticks:
         ax_tbl.text(
             tick,
@@ -232,13 +240,14 @@ def draw_reference_chart(
         )
 
     day_starts = pd.date_range(start_day, pd.Timestamp(times.max()).normalize(), freq="D")
+    date_label_format = cfg.x_date_label_format or "%Y.%m.%d"
     for day_start in day_starts:
         center = day_start + pd.Timedelta(hours=12)
         if xmin <= center <= xmax:
             ax_tbl.text(
                 center,
                 cfg.table_row_bottom_y,
-                day_start.strftime("%Y.%m.%d"),
+                day_start.strftime(date_label_format),
                 ha="center",
                 va="center",
                 fontsize=cfg.tick_fontsize,

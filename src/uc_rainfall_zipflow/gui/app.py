@@ -1543,6 +1543,30 @@ class ZipFlowGui:
             )
         )
 
+    def _write_intermediate_json(
+        self,
+        *,
+        output_root: Path,
+        jobs: list[dict[str, Any]],
+        filename: str = "_intermediate.json",
+        source_mode: str = "rain",
+    ) -> Path:
+        out_dir = output_root / "plots_reference"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format": "uc_rainfall_zipflow.intermediate.v1",
+            "source_mode": source_mode,
+            "generated_at_jst": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "job_count": len(jobs),
+            "jobs": jobs,
+        }
+        out_path = out_dir / filename
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return out_path
+
     def _on_run_clicked(self) -> None:
         if self._is_running:
             return
@@ -1578,6 +1602,15 @@ class ZipFlowGui:
                 error_text: str | None = None
                 try:
                     result = run_excel_mode(excel_config)
+                    jobs_raw = result.get("intermediate_jobs", []) if isinstance(result, dict) else []
+                    if isinstance(jobs_raw, list) and jobs_raw:
+                        out_json = self._write_intermediate_json(
+                            output_root=excel_config.output_root,
+                            jobs=[job for job in jobs_raw if isinstance(job, dict)],
+                            filename="_intermediate_excel.json",
+                            source_mode="excel",
+                        )
+                        result["intermediate_json_path"] = str(out_json)
                 except ZipFlowError as exc:
                     error_text = f"[ERROR] {exc}"
                 except Exception as exc:  # noqa: BLE001
@@ -1596,6 +1629,8 @@ class ZipFlowGui:
                     self._set_status("完了")
                     self._append_log("実行完了")
                     self._set_summary(self._format_summary(result))
+                    if result.get("intermediate_json_path"):
+                        self._append_log(f"中間JSON出力(Excel): {result['intermediate_json_path']}")
                     messagebox.showinfo("実行完了", self._build_completion_message(result, mode="Excelデータ"))
 
                 self.root.after(0, done)
@@ -1643,26 +1678,6 @@ class ZipFlowGui:
 
             def emit_log(message: str) -> None:
                 self.root.after(0, lambda m=message: self._append_log(m))
-
-            def write_intermediate_json(
-                *,
-                output_root: Path,
-                jobs: list[dict[str, Any]],
-            ) -> Path:
-                out_dir = output_root / "plots_reference"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                payload = {
-                    "format": "uc_rainfall_zipflow.intermediate.v1",
-                    "generated_at_jst": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "job_count": len(jobs),
-                    "jobs": jobs,
-                }
-                out_path = out_dir / "_intermediate.json"
-                out_path.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                return out_path
 
             try:
                 zip_windows_cache: dict[Path, list] = {}
@@ -1718,7 +1733,7 @@ class ZipFlowGui:
                                     "weighted_mean_mm": region_payload.get("weighted_mean_mm", []),
                                 }
                             )
-                        out_json = write_intermediate_json(output_root=cfg.output_root, jobs=jobs)
+                        out_json = self._write_intermediate_json(output_root=cfg.output_root, jobs=jobs)
                         emit_log(f"中間JSON出力: {out_json}")
                     emit_log(
                         "処理中: 集計完了 "
@@ -1876,7 +1891,7 @@ class ZipFlowGui:
                             )
                             agg_plot += len(generated)
                         for root_dir, jobs in intermediate_by_root.items():
-                            out_json = write_intermediate_json(output_root=root_dir.parent, jobs=jobs)
+                            out_json = self._write_intermediate_json(output_root=root_dir.parent, jobs=jobs)
                             emit_log(f"中間JSON出力: {out_json}")
 
                     if requested_plot_ref_any and agg_plot <= 0:
@@ -1960,6 +1975,8 @@ class ZipFlowGui:
             ]
             if result.get("log_path"):
                 lines.append(f"ログ: {result['log_path']}")
+            if result.get("intermediate_json_path"):
+                lines.append(f"中間JSON: {result['intermediate_json_path']}")
             return "\n".join(lines)
         lines = [
             f"出力先: {result.get('base_dir')}",
@@ -1983,6 +2000,8 @@ class ZipFlowGui:
             ]
             if result.get("log_path"):
                 lines.append(f"ログ: {result.get('log_path')}")
+            if result.get("intermediate_json_path"):
+                lines.append(f"中間JSON: {result.get('intermediate_json_path')}")
             return "\n".join(lines)
         lines = [
             "処理が完了しました。",
