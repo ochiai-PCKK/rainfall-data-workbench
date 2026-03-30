@@ -3,15 +3,12 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import tkinter as tk
-from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -35,14 +32,22 @@ from ..models import RunConfig
 from ..runtime_paths import resolve_path
 from ..style_profile import default_style_profile_path, load_style_profile
 from ..zip_selector import list_zip_windows
+from . import help_service as _help_service
+from .common_helpers import find_latest_timeseries_csv as _find_latest_timeseries_csv
+from .common_helpers import list_available_region_keys as _list_available_region_keys
+from .common_helpers import parse_date as _parse_date
+from .common_helpers import resolve_base_date as _resolve_base_date
 from .excel_mode_panel import ExcelModePanel
+from .image_merge_service import A4MergeResult, A4MergeSpec, choose_a4_layout_plan, merge_pngs_to_a4
 from .rain_mode_panel import RainModePanel
+from .result_messages import build_completion_message as _build_completion_message_text
+from .result_messages import format_summary as _format_summary_text
+from .state_mapper import apply_loaded_state, collect_state_payload
+from .state_store import GUI_STATE_PATH, load_state, save_state
 from .style_tuner_window import launch_style_tuner
 from .types import StyleTunerInput
 
 _DATE_FMT = "%Y-%m-%d"
-_GUI_STATE_PATH = resolve_path("config", "uc_rainfall_zipflow", "gui_state.json")
-_GUI_HELP_REL_PATH = Path("config") / "uc_rainfall_zipflow" / "gui_help.txt"
 _SCREENSHOT_DIR = resolve_path("outputs", "_gui_screenshots")
 _GUI_TEST_DIR = resolve_path("outputs", "_gui_test")
 _EXCEL_CANDIDATES_DIR = resolve_path("outputs", "excel_candidates")
@@ -71,247 +76,28 @@ _GRAPH_KIND_LABELS = {
 }
 _EXCEL_FIXED_REGION_KEYS = ("nishiyoke_higashiyoke",)
 _EXCEL_FIXED_OUTPUT_KINDS = ("plots_ref",)
-_DEFAULT_GUI_HELP_TEXT = """【流域雨量グラフ作成 ヘルプ】
-
-1. モード
-- 解析雨量データ: ZIP入力から流域ごとの出力を作成します。
-- Excelデータ: Excelシート時系列から整形グラフを作成します。
-
-2. 基本操作
-- 入出力欄で入力元と出力先を指定します。
-- 実行設定で対象流域・出力種別・グラフ指標を選びます。
-- 「処理を実行」で出力を開始します。
-
-3. 画像マージ
-- 「実行後に画像マージ」をONにすると、実行完了後に自動でマージします。
-- 「今すぐ画像マージ」で、既存の plots_reference PNG を対象に手動実行できます。
-- 行列は「列数」「行数」で指定します（初期値: 2列 x 4行）。
-- 最後のページに余りがある場合は空欄のまま出力します。
-
-4. グラフスタイル調整
-- 「グラフスタイル調整」で見た目を変更できます。
-- 保存して閉じると、次回実行から反映されます。
-
-5. よくあるエラー
-- 入力ファイルが見つからない:
-  パスを再確認し、読み取り可能な場所を指定してください。
-- Excel期間不一致:
-  シート名日付と時刻列(B列)の期間整合を確認してください。
-- 画像マージ対象なし:
-  先に plots_reference のPNGを出力してください。
-"""
-
-
-@dataclass(frozen=True)
-class A4MergeSpec:
-    columns: int
-    rows: int
-
-
-@dataclass(frozen=True)
-class A4LayoutPlan:
-    cols: int
-    rows: int
-    page_count: int
-    cell_width_px: int
-    cell_height_px: int
-    canvas_width_px: int
-    canvas_height_px: int
-
-
-@dataclass(frozen=True)
-class A4MergeResult:
-    paths: list[Path]
-    plan: A4LayoutPlan
-    warning: str | None
-
-
-def choose_a4_layout_plan(
-    *,
-    image_sizes: list[tuple[int, int]],
-    spec: A4MergeSpec,
-) -> A4LayoutPlan:
-    if not image_sizes:
-        raise ValueError("画像がありません。")
-    if spec.columns <= 0 or spec.rows <= 0:
-        raise ValueError("画像マージ設定が不正です。")
-
-    base_cell_w = max(max(1, int(w)) for w, _ in image_sizes)
-    base_cell_h = max(max(1, int(h)) for _, h in image_sizes)
-    image_count = len(image_sizes)
-
-    cols = int(spec.columns)
-    rows = int(spec.rows)
-    capacity = cols * rows
-    page_count = int(math.ceil(image_count / capacity))
-    return A4LayoutPlan(
-        cols=cols,
-        rows=rows,
-        page_count=page_count,
-        cell_width_px=base_cell_w,
-        cell_height_px=base_cell_h,
-        canvas_width_px=base_cell_w * cols,
-        canvas_height_px=base_cell_h * rows,
-    )
-
-
-def merge_pngs_to_a4(
-    *,
-    input_paths: list[Path],
-    output_dir: Path,
-    spec: A4MergeSpec,
-) -> A4MergeResult:
-    png_paths = [path for path in input_paths if path.suffix.lower() == ".png" and path.exists()]
-    if not png_paths:
-        raise ValueError("マージ対象PNGがありません。")
-
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError("画像マージには Pillow が必要です。`uv add pillow` を実行してください。") from exc
-
-    with ExitStack() as stack:
-        images = [stack.enter_context(Image.open(path)) for path in png_paths]
-        sizes = [(int(img.width), int(img.height)) for img in images]
-    plan = choose_a4_layout_plan(image_sizes=sizes, spec=spec)
-
-    merged_dir = output_dir / f"_merged_{plan.cols}x{plan.rows}"
-    merged_dir.mkdir(parents=True, exist_ok=True)
-    capacity = plan.cols * plan.rows
-    merged_paths: list[Path] = []
-
-    for page_index in range(plan.page_count):
-        start = page_index * capacity
-        chunk = png_paths[start : start + capacity]
-        if not chunk:
-            continue
-        canvas = Image.new("RGB", (plan.canvas_width_px, plan.canvas_height_px), "white")
-        with ExitStack() as stack:
-            page_images = [stack.enter_context(Image.open(path)) for path in chunk]
-            for pos, img in enumerate(page_images):
-                row = pos // plan.cols
-                col = pos % plan.cols
-                cell_x = col * plan.cell_width_px
-                cell_y = row * plan.cell_height_px
-                resized = img.convert("RGB")
-                paste_x = cell_x + max(0, (plan.cell_width_px - resized.width) // 2)
-                paste_y = cell_y + max(0, (plan.cell_height_px - resized.height) // 2)
-                canvas.paste(resized, (paste_x, paste_y))
-        out_path = merged_dir / f"merged_{plan.cols}x{plan.rows}_{page_index + 1:03d}.png"
-        canvas.save(out_path)
-        merged_paths.append(out_path)
-    return A4MergeResult(paths=merged_paths, plan=plan, warning=None)
-
-
-def _parse_date(raw: str, *, field_name: str) -> date:
-    try:
-        return datetime.strptime(raw.strip(), _DATE_FMT).date()
-    except ValueError as exc:
-        raise ValueError(f"{field_name} は YYYY-MM-DD 形式で入力してください。") from exc
-
-
-def _resolve_base_date(start_date: date, end_date: date) -> date:
-    day_count = (end_date - start_date).days + 1
-    return start_date + timedelta(days=day_count // 2)
-
-
-def _list_available_region_keys(polygon_dir: Path) -> set[str]:
-    from ..regions import load_region_specs
-
-    try:
-        specs = load_region_specs(polygon_dir)
-    except Exception:
-        return set()
-    return {spec.region_key for spec in specs}
-
-
-def _load_state() -> dict[str, object]:
-    if not _GUI_STATE_PATH.exists():
-        return {}
-    try:
-        raw = json.loads(_GUI_STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _save_state(state: dict[str, object]) -> None:
-    _GUI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _GUI_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_gui_help_text(path: Path) -> str:
-    if not path.exists():
-        return (
-            "ヘルプファイルが見つかりません。\n\n"
-            f"対象: {path}\n"
-            "管理者に連絡してヘルプファイルを配置してください。"
-        )
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001
-        return (
-            "ヘルプファイルの読み込みに失敗しました。\n\n"
-            f"対象: {path}\n"
-            f"詳細: {exc}"
-        )
-    stripped = text.strip()
-    if not stripped:
-        return (
-            "ヘルプファイルが空です。\n\n"
-            f"対象: {path}\n"
-            "ヘルプ内容を記述してください。"
-        )
-    return stripped
+    return _help_service._load_gui_help_text(path)
 
 
 def _preferred_gui_help_output_path() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / _GUI_HELP_REL_PATH
-    return resolve_path(*_GUI_HELP_REL_PATH.parts)
+    return _help_service._preferred_gui_help_output_path()
 
 
 def _ensure_gui_help_file_exists() -> Path | None:
-    target = _preferred_gui_help_output_path()
-    if target.exists():
-        return target
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_DEFAULT_GUI_HELP_TEXT.strip() + "\n", encoding="utf-8")
-        return target
-    except Exception:
-        return None
+    return _help_service._ensure_gui_help_file_exists()
 
 
 def _iter_gui_help_candidates() -> list[Path]:
-    exe_dir = Path(sys.executable).resolve().parent
-    return [
-        exe_dir / _GUI_HELP_REL_PATH,
-        exe_dir / "gui_help.txt",
-        resolve_path(*_GUI_HELP_REL_PATH.parts),
-    ]
+    return _help_service._iter_gui_help_candidates()
 
 
 def _load_gui_help_text_from_candidates() -> str:
-    auto_generated = _ensure_gui_help_file_exists()
-    if auto_generated is not None and auto_generated.exists():
-        return _load_gui_help_text(auto_generated)
-    candidates = _iter_gui_help_candidates()
-    for path in candidates:
-        if path.exists():
-            return _load_gui_help_text(path)
-    return _DEFAULT_GUI_HELP_TEXT.strip()
+    return _help_service._load_gui_help_text_from_candidates()
 
 
-def _find_latest_timeseries_csv(*, output_root: Path, region_key: str) -> Path | None:
-    if not output_root.exists():
-        return None
-    pattern = f"*/analysis_csv/{region_key}/{region_key}_*_timeseries.csv"
-    candidates = [p for p in output_root.glob(pattern) if p.is_file()]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
 
 
 class ZipFlowGui:
@@ -330,7 +116,7 @@ class ZipFlowGui:
         self._help_window: tk.Toplevel | None = None
         self._help_text_widget: tk.Text | None = None
 
-        self._state = _load_state()
+        self._state = load_state()
         self._is_running = False
         self._last_result: dict[str, object] | None = None
         self._path_rows: list[tuple[ttk.Frame, ttk.Label, ttk.Button]] = []
@@ -1006,103 +792,21 @@ class ZipFlowGui:
 
     def _on_save_state_clicked(self) -> None:
         state = self._collect_state_payload()
-        _save_state(state)
-        self._append_log(f"設定を保存しました: {_GUI_STATE_PATH}")
+        save_state(state)
+        self._append_log(f"設定を保存しました: {GUI_STATE_PATH}")
         self._set_status("設定保存完了")
 
     def _on_reload_state_clicked(self) -> None:
-        self._state = _load_state()
+        self._state = load_state()
         self._apply_loaded_state()
         self._append_log("設定を再読込しました。")
         self._set_status("設定読込完了")
 
     def _collect_state_payload(self) -> dict[str, object]:
-        return {
-            "run_mode": self.run_mode_var.get().strip(),
-            "input_zipdir": self.input_zipdir_var.get().strip(),
-            "input_excel": self.input_excel_var.get().strip(),
-            "excel_graph_span": self.excel_panel.get_span(),
-            "excel_selected_event_keys": self.excel_panel.get_selected_event_keys(),
-            "rain_period_input_mode": self.rain_panel.period_input_mode_var.get().strip(),
-            "rain_window_mode": self.rain_panel.get_window_mode(),
-            "rain_selected_dates": [
-                self.rain_panel.date_listbox.get(i) for i in self.rain_panel.date_listbox.curselection()
-            ],
-            "rain_dates_csv_path": self.rain_dates_csv_var.get().strip(),
-            "rain_dates_excel_path": self.rain_dates_excel_var.get().strip(),
-            "rain_compute_engine": self.compute_engine_var.get().strip(),
-            "output_dir": self.output_dir_var.get().strip(),
-            "polygon_dir": self.polygon_dir_var.get().strip(),
-            "period_start": self.start_date_var.get().strip(),
-            "period_end": self.end_date_var.get().strip(),
-            "selected_regions": [k for k, v in self.region_vars.items() if v.get()],
-            "selected_outputs": [k for k, v in self.output_vars.items() if v.get()],
-            "ref_graph_kinds": [k for k, v in self.graph_kind_vars.items() if v.get()],
-            "enable_log": bool(self.enable_log_var.get()),
-            "export_svg": bool(self.export_svg_var.get()),
-            "merge_a4_enabled": bool(self.merge_a4_enabled_var.get()),
-            "merge_a4_columns": self.merge_a4_columns_var.get().strip(),
-            "merge_a4_rows": self.merge_a4_rows_var.get().strip(),
-        }
+        return collect_state_payload(self)
 
     def _apply_loaded_state(self) -> None:
-        state = self._state
-        mode = str(state.get("run_mode", self.run_mode_var.get()))
-        self.run_mode_var.set(mode if mode in _RUN_MODES else _RUN_MODES[0])
-        self.input_zipdir_var.set(str(state.get("input_zipdir", self.input_zipdir_var.get())))
-        self.input_excel_var.set(str(state.get("input_excel", self.input_excel_var.get())))
-        self.rain_panel.period_input_mode_var.set(
-            str(state.get("rain_period_input_mode", self.rain_panel.period_input_mode_var.get()))
-        )
-        self.rain_panel.window_mode_var.set(str(state.get("rain_window_mode", self.rain_panel.get_window_mode())))
-        self.rain_dates_csv_var.set(str(state.get("rain_dates_csv_path", self.rain_dates_csv_var.get())))
-        self.rain_dates_excel_var.set(str(state.get("rain_dates_excel_path", self.rain_dates_excel_var.get())))
-        loaded_engine = str(state.get("rain_compute_engine", self.compute_engine_var.get())).strip()
-        self.compute_engine_var.set(loaded_engine if loaded_engine in _RUNTIME_ENGINES else "python")
-        self.rain_panel.mark_zipdir_changed()
-        self.rain_panel.refresh_candidates(self.input_zipdir_var.get().strip(), force=False)
-        selected_rain_dates = set(cast(list[str], state.get("rain_selected_dates", [])))
-        if selected_rain_dates and self.rain_panel.date_listbox.size() > 0:
-            self.rain_panel.date_listbox.selection_clear(0, tk.END)
-            for i in range(self.rain_panel.date_listbox.size()):
-                val = self.rain_panel.date_listbox.get(i)
-                if val in selected_rain_dates:
-                    self.rain_panel.date_listbox.selection_set(i)
-            self.rain_panel._update_selected_count()
-        self.excel_panel.refresh_candidates(self.input_excel_var.get().strip())
-        self.excel_panel.span_var.set(str(state.get("excel_graph_span", self.excel_panel.get_span())))
-        selected_excel = set(
-            cast(
-                list[str],
-                state.get("excel_selected_event_keys", state.get("excel_selected_sheets", [])),
-            )
-        )
-        self.excel_panel.select_by_event_keys(selected_excel)
-        self.output_dir_var.set(str(state.get("output_dir", self.output_dir_var.get())))
-        self.polygon_dir_var.set(str(state.get("polygon_dir", self.polygon_dir_var.get())))
-        self.start_date_var.set(str(state.get("period_start", self.start_date_var.get())))
-        self.end_date_var.set(str(state.get("period_end", self.end_date_var.get())))
-        self.enable_log_var.set(bool(state.get("enable_log", self.enable_log_var.get())))
-        self.export_svg_var.set(bool(state.get("export_svg", self.export_svg_var.get())))
-        self.merge_a4_enabled_var.set(bool(state.get("merge_a4_enabled", self.merge_a4_enabled_var.get())))
-        self.merge_a4_columns_var.set(str(state.get("merge_a4_columns", self.merge_a4_columns_var.get())))
-        self.merge_a4_rows_var.set(str(state.get("merge_a4_rows", self.merge_a4_rows_var.get())))
-
-        selected_regions = set(cast(list[str], state.get("selected_regions", [])))
-        if selected_regions:
-            for key, var in self.region_vars.items():
-                var.set(key in selected_regions)
-        selected_outputs = set(cast(list[str], state.get("selected_outputs", [])))
-        if selected_outputs:
-            for key, var in self.output_vars.items():
-                var.set(key in selected_outputs)
-        graph_kinds = set(cast(list[str], state.get("ref_graph_kinds", [])))
-        if graph_kinds:
-            for key, var in self.graph_kind_vars.items():
-                var.set(key in graph_kinds)
-        self._saved_rain_region_state = {k: bool(v.get()) for k, v in self.region_vars.items()}
-        self._saved_rain_output_state = {k: bool(v.get()) for k, v in self.output_vars.items()}
-        self._update_input_mode_visibility()
+        apply_loaded_state(self, self._state, run_modes=_RUN_MODES, runtime_engines=_RUNTIME_ENGINES)
 
     def _on_import_rain_dates_csv(self) -> None:
         initial_csv = self.rain_dates_csv_var.get().strip()
@@ -1163,7 +867,7 @@ class ZipFlowGui:
             f"unmatched={result['unmatched_count']} invalid={invalid_count} file={csv_path}"
         )
         self._update_graph_span_label()
-        _save_state(self._collect_state_payload())
+        save_state(self._collect_state_payload())
 
     def _on_import_rain_dates_from_excel(self) -> None:
         initial_excel = self.rain_dates_excel_var.get().strip() or self.input_excel_var.get().strip()
@@ -1225,7 +929,7 @@ class ZipFlowGui:
             f"matched={result['matched_count']} unmatched={result['unmatched_count']} file={excel_path}"
         )
         self._update_graph_span_label()
-        _save_state(self._collect_state_payload())
+        save_state(self._collect_state_payload())
 
     def _read_event_dates_csv(self, csv_path: Path) -> tuple[list[date], int]:
         if not csv_path.exists():
@@ -1953,7 +1657,7 @@ class ZipFlowGui:
                 f"inputs={len(excel_config.input_excels)} "
                 f"span={excel_config.graph_span} graph_kinds={list(excel_config.ref_graph_kinds)}"
             )
-            _save_state(self._collect_state_payload())
+            save_state(self._collect_state_payload())
 
             def excel_worker() -> None:
                 result: dict[str, object] | None = None
@@ -2043,7 +1747,7 @@ class ZipFlowGui:
                 f"({day_count}日窓) regions={list(configs_with_policy[0].region_keys)} "
                 f"outputs={list(configs_with_policy[0].output_kinds)}"
             )
-        _save_state(self._collect_state_payload())
+        save_state(self._collect_state_payload())
 
         def worker() -> None:
             result: dict[str, object] | None = None
@@ -2362,85 +2066,10 @@ class ZipFlowGui:
             raise
 
     def _format_summary(self, result: dict[str, object]) -> str:
-        if result.get("event_count") is not None:
-            lines = [
-                f"出力先: {result.get('base_dir')}",
-                f"対象イベント数: {result.get('event_count')}",
-                f"グラフ出力数: {result.get('plot_count')}",
-            ]
-            if result.get("log_path"):
-                lines.append(f"ログ: {result['log_path']}")
-            if result.get("intermediate_json_path"):
-                lines.append(f"中間JSON: {result['intermediate_json_path']}")
-            if result.get("merged_a4_count") is not None:
-                lines.append(
-                    "画像マージ: "
-                    f"{result.get('merged_a4_count')}ページ "
-                    f"(layout={result.get('merged_a4_layout')})"
-                )
-                if result.get("merged_a4_warning"):
-                    lines.append(f"警告: {result.get('merged_a4_warning')}")
-            return "\n".join(lines)
-        lines = [
-            f"出力先: {result.get('base_dir')}",
-            f"採用ZIP数: {result.get('zip_count')}",
-            f"グラフ出力数: {result.get('plot_count')}",
-            f"時系列CSV数: {result.get('csv_count')} / セルCSV数: {result.get('cell_csv_count')}",
-        ]
-        if result.get("log_path"):
-            lines.append(f"ログ: {result['log_path']}")
-        if result.get("csv_readme_path"):
-            lines.append(f"CSV説明: {result['csv_readme_path']}")
-        if result.get("merged_a4_count") is not None:
-            lines.append(
-                "画像マージ: "
-                f"{result.get('merged_a4_count')}ページ "
-                f"(layout={result.get('merged_a4_layout')})"
-            )
-            if result.get("merged_a4_warning"):
-                lines.append(f"警告: {result.get('merged_a4_warning')}")
-        return "\n".join(lines)
+        return _format_summary_text(result)
 
     def _build_completion_message(self, result: dict[str, object], *, mode: str) -> str:
-        if mode == "Excelデータ":
-            lines = [
-                "処理が完了しました。",
-                f"対象イベント数: {result.get('event_count')}",
-                f"グラフ出力数: {result.get('plot_count')}",
-                f"出力先: {result.get('base_dir')}",
-            ]
-            if result.get("log_path"):
-                lines.append(f"ログ: {result.get('log_path')}")
-            if result.get("intermediate_json_path"):
-                lines.append(f"中間JSON: {result.get('intermediate_json_path')}")
-            if result.get("merged_a4_count") is not None:
-                lines.append(
-                    "画像マージ: "
-                    f"{result.get('merged_a4_count')}ページ "
-                    f"(layout={result.get('merged_a4_layout')})"
-                )
-                if result.get("merged_a4_warning"):
-                    lines.append(f"警告: {result.get('merged_a4_warning')}")
-            return "\n".join(lines)
-        lines = [
-            "処理が完了しました。",
-            f"採用ZIP数: {result.get('zip_count')}",
-            f"グラフ出力数: {result.get('plot_count')}",
-            f"時系列CSV数: {result.get('csv_count')}",
-            f"セルCSV数: {result.get('cell_csv_count')}",
-            f"出力先: {result.get('base_dir')}",
-        ]
-        if result.get("log_path"):
-            lines.append(f"ログ: {result.get('log_path')}")
-        if result.get("merged_a4_count") is not None:
-            lines.append(
-                "画像マージ: "
-                f"{result.get('merged_a4_count')}ページ "
-                f"(layout={result.get('merged_a4_layout')})"
-            )
-            if result.get("merged_a4_warning"):
-                lines.append(f"警告: {result.get('merged_a4_warning')}")
-        return "\n".join(lines)
+        return _build_completion_message_text(result, mode=mode)
 
     def _on_pick_tuner_csv(self) -> None:
         selected = filedialog.askopenfilename(
@@ -2572,7 +2201,7 @@ class ZipFlowGui:
             messagebox.showerror("起動エラー", f"グラフスタイル調整を起動できませんでした: {exc}")
 
     def _on_close(self) -> None:
-        _save_state(self._collect_state_payload())
+        save_state(self._collect_state_payload())
         self.root.destroy()
 
     def _auto_capture_once(self) -> None:

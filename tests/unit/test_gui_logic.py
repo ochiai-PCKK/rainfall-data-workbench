@@ -197,10 +197,10 @@ def test_load_gui_help_text_reports_missing_file(tmp_path: Path) -> None:
 
 
 def test_iter_gui_help_candidates_includes_exe_and_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    from uc_rainfall_zipflow.gui import app as app_module
+    from uc_rainfall_zipflow.gui import help_service as hs_module
 
-    monkeypatch.setattr(app_module.sys, "executable", r"C:\dist\RainfallGraphCreator.exe")
-    monkeypatch.setattr(app_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
+    monkeypatch.setattr(hs_module.sys, "executable", r"C:\dist\RainfallGraphCreator.exe")
+    monkeypatch.setattr(hs_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
 
     paths = _iter_gui_help_candidates()
     rendered = [str(p) for p in paths]
@@ -211,10 +211,10 @@ def test_iter_gui_help_candidates_includes_exe_and_base(monkeypatch: pytest.Monk
 
 
 def test_preferred_gui_help_output_path_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
-    from uc_rainfall_zipflow.gui import app as app_module
+    from uc_rainfall_zipflow.gui import help_service as hs_module
 
-    monkeypatch.setattr(app_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
-    monkeypatch.setattr(app_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(hs_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
+    monkeypatch.setattr(hs_module.sys, "frozen", False, raising=False)
 
     path = _preferred_gui_help_output_path()
 
@@ -222,10 +222,10 @@ def test_preferred_gui_help_output_path_not_frozen(monkeypatch: pytest.MonkeyPat
 
 
 def test_ensure_gui_help_file_exists_creates_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from uc_rainfall_zipflow.gui import app as app_module
+    from uc_rainfall_zipflow.gui import help_service as hs_module
 
     target = tmp_path / "config" / "uc_rainfall_zipflow" / "gui_help.txt"
-    monkeypatch.setattr(app_module, "_preferred_gui_help_output_path", lambda: target)
+    monkeypatch.setattr(hs_module, "_preferred_gui_help_output_path", lambda: target)
 
     created = _ensure_gui_help_file_exists()
 
