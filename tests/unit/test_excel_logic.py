@@ -100,7 +100,7 @@ def test_load_sheet_series_rejects_non_120_points(tmp_path: Path) -> None:
     path = tmp_path / "series_bad.xlsx"
     _write_event_workbook(path, "2024.01.03", rows=119)
 
-    with pytest.raises(ZipFlowError, match="expected=120"):
+    with pytest.raises(ZipFlowError, match="期待点数: 120"):
         _load_sheet_series(path, sheet_name="2024.01.03", base_date=date(2024, 1, 3))
 
 

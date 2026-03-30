@@ -77,6 +77,8 @@ def test_build_excel_axis_tops_uses_render_span_window_only() -> None:
 
     jobs = [
         _ExcelRenderJob(
+            source_path=Path("a.xlsx"),
+            source_alias="a.xlsx",
             sheet_name="2024.01.03",
             base_date=base_date,
             effective_base_date=base_date,
@@ -84,6 +86,8 @@ def test_build_excel_axis_tops_uses_render_span_window_only() -> None:
             frame_mean=frame_a,
         ),
         _ExcelRenderJob(
+            source_path=Path("b.xlsx"),
+            source_alias="b.xlsx",
             sheet_name="2024.01.04",
             base_date=date(2024, 1, 4),
             effective_base_date=date(2024, 1, 4),

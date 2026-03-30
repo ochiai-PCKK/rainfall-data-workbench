@@ -22,11 +22,25 @@ _REGION_KEY_EXCEL_DEFAULT = "nishiyoke_higashiyoke"
 _REGION_LABEL_EXCEL_DEFAULT = "西除川+東除川"
 
 
+def build_excel_filename_prefix(source_alias: str) -> str:
+    safe = re.sub(r"[^0-9A-Za-z_-]+", "_", source_alias).strip("_")
+    return f"excel_{safe or 'source'}_"
+
+
+@dataclass(frozen=True)
+class ExcelSelectedEvent:
+    source_path: Path
+    source_alias: str
+    sheet_name: str
+    event_date: date
+    is_resplit: bool
+
+
 @dataclass(frozen=True)
 class ExcelRunConfig:
-    input_excel: Path
+    input_excels: tuple[Path, ...]
     output_root: Path
-    selected_sheets: tuple[str, ...]
+    selected_events: tuple[ExcelSelectedEvent, ...]
     graph_span: str  # 5d | 3d_left | 3d_center | 3d_right
     ref_graph_kinds: tuple[str, ...]  # sum | mean
     export_svg: bool
@@ -46,6 +60,8 @@ class ExcelEventCandidate:
 
 @dataclass(frozen=True)
 class _ExcelRenderJob:
+    source_path: Path
+    source_alias: str
     sheet_name: str
     base_date: date
     effective_base_date: date
@@ -129,7 +145,7 @@ def resolve_effective_base_date(base_date: date, graph_span: str) -> date:
     return base_date
 
 
-def _to_datetime(value: object, *, row_no: int, sheet_name: str) -> datetime:
+def _to_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
         return value
     if isinstance(value, date):
@@ -137,27 +153,46 @@ def _to_datetime(value: object, *, row_no: int, sheet_name: str) -> datetime:
     parsed = pd.to_datetime(value, errors="coerce")
     if pd.isna(parsed):
         raise ZipFlowError(
-            f"Excel時刻列(B列)の解釈に失敗しました: sheet={sheet_name} row={row_no}",
+            "Excel時刻列(B列)の解釈に失敗しました。",
             exit_code=5,
         )
     return pd.Timestamp(parsed).to_pydatetime()
 
 
-def _to_float(value: object, *, row_no: int, sheet_name: str) -> float:
+def _to_float(value: object) -> float:
     parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     if pd.isna(parsed):
         raise ZipFlowError(
-            f"Excel雨量列(Q列)の数値変換に失敗しました: sheet={sheet_name} row={row_no}",
+            "Excel雨量列(Q列)の数値変換に失敗しました。",
             exit_code=5,
         )
     return float(parsed)
+
+
+def _excel_context_text(excel_path: Path, *, sheet_name: str, row_no: int | None = None) -> str:
+    if row_no is None:
+        return (
+            f"対象ファイル: {excel_path.name}\n"
+            f"ファイルパス: {excel_path}\n"
+            f"対象シート: {sheet_name}"
+        )
+    return (
+        f"対象ファイル: {excel_path.name}\n"
+        f"ファイルパス: {excel_path}\n"
+        f"対象シート: {sheet_name}\n"
+        f"対象行: {row_no}"
+    )
 
 
 def _load_sheet_series(excel_path: Path, *, sheet_name: str, base_date: date) -> pd.DataFrame:
     wb = load_workbook(excel_path, data_only=True, read_only=True)
     try:
         if sheet_name not in wb.sheetnames:
-            raise ZipFlowError(f"指定シートが存在しません: {sheet_name}", exit_code=5)
+            raise ZipFlowError(
+                "指定シートが存在しません。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}",
+                exit_code=5,
+            )
         ws = wb[sheet_name]
         rows: list[dict[str, object]] = []
         for row_no, values in enumerate(ws.iter_rows(min_row=5, max_col=17, values_only=True), start=5):
@@ -167,30 +202,62 @@ def _load_sheet_series(excel_path: Path, *, sheet_name: str, base_date: date) ->
                 continue
             if b is None or q is None:
                 raise ZipFlowError(
-                    f"Excel時系列に欠損行があります(B/Q片側欠損): sheet={sheet_name} row={row_no}",
+                    "Excel時系列に欠損行があります（B列またはQ列が空欄）。\n"
+                    f"{_excel_context_text(excel_path, sheet_name=sheet_name, row_no=row_no)}",
                     exit_code=5,
                 )
-            observed = _to_datetime(b, row_no=row_no, sheet_name=sheet_name)
-            rainfall = _to_float(q, row_no=row_no, sheet_name=sheet_name)
+            try:
+                observed = _to_datetime(b)
+            except ZipFlowError as exc:
+                raise ZipFlowError(
+                    f"{exc}\n{_excel_context_text(excel_path, sheet_name=sheet_name, row_no=row_no)}",
+                    exit_code=exc.exit_code,
+                ) from exc
+            try:
+                rainfall = _to_float(q)
+            except ZipFlowError as exc:
+                raise ZipFlowError(
+                    f"{exc}\n{_excel_context_text(excel_path, sheet_name=sheet_name, row_no=row_no)}",
+                    exit_code=exc.exit_code,
+                ) from exc
             rows.append({"observed_at": observed, "rainfall_mm": rainfall})
 
         frame = pd.DataFrame(rows)
         if frame.empty:
-            raise ZipFlowError(f"Excel時系列が空です: sheet={sheet_name}", exit_code=5)
+            raise ZipFlowError(
+                "Excel時系列が空です。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}",
+                exit_code=5,
+            )
         if len(frame) != 120:
             raise ZipFlowError(
-                f"Excel時系列点数が120ではありません: sheet={sheet_name} expected=120 actual={len(frame)}",
+                "Excel時系列点数が120ではありません。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}\n"
+                f"期待点数: 120\n"
+                f"実点数: {len(frame)}",
                 exit_code=5,
             )
 
         if frame["observed_at"].duplicated().any():
-            raise ZipFlowError(f"Excel時刻列に重複があります: sheet={sheet_name}", exit_code=5)
+            raise ZipFlowError(
+                "Excel時刻列に重複があります。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}",
+                exit_code=5,
+            )
         if not frame["observed_at"].is_monotonic_increasing:
-            raise ZipFlowError(f"Excel時刻列が昇順ではありません: sheet={sheet_name}", exit_code=5)
+            raise ZipFlowError(
+                "Excel時刻列が昇順ではありません。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}",
+                exit_code=5,
+            )
 
         diffs = frame["observed_at"].diff().dropna()
         if not diffs.eq(timedelta(hours=1)).all():
-            raise ZipFlowError(f"Excel時刻列が1時間間隔ではありません: sheet={sheet_name}", exit_code=5)
+            raise ZipFlowError(
+                "Excel時刻列が1時間間隔ではありません。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}",
+                exit_code=5,
+            )
 
         expected_start = datetime.combine(base_date - timedelta(days=2), time(hour=1))
         expected_end = datetime.combine(base_date + timedelta(days=3), time(hour=0))
@@ -198,9 +265,11 @@ def _load_sheet_series(excel_path: Path, *, sheet_name: str, base_date: date) ->
         actual_end = pd.Timestamp(frame["observed_at"].iloc[-1]).to_pydatetime()
         if actual_start != expected_start or actual_end != expected_end:
             raise ZipFlowError(
-                "Excel時系列の期間がシート日付と一致しません: "
-                f"sheet={sheet_name} expected={expected_start:%Y-%m-%d %H:%M}..{expected_end:%Y-%m-%d %H:%M} "
-                f"actual={actual_start:%Y-%m-%d %H:%M}..{actual_end:%Y-%m-%d %H:%M}",
+                "Excel時系列の期間がシート日付と一致しません。\n"
+                f"{_excel_context_text(excel_path, sheet_name=sheet_name)}\n"
+                f"期待期間: {expected_start:%Y-%m-%d %H:%M} ～ {expected_end:%Y-%m-%d %H:%M}\n"
+                f"実データ期間: {actual_start:%Y-%m-%d %H:%M} ～ {actual_end:%Y-%m-%d %H:%M}\n"
+                "確認ポイント: シート名の日付 / B列の開始・終了時刻 / 入力ファイル選択",
                 exit_code=5,
             )
         # Excel側の1時間は「01:00〜翌00:00」表記のため、グラフ系は0時起点へ正規化して扱う。
@@ -242,9 +311,12 @@ def _build_excel_axis_tops(
 
 
 def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
-    if not config.input_excel.exists():
-        raise ZipFlowError(f"入力Excelファイルが見つかりません: {config.input_excel}", exit_code=2)
-    if not config.selected_sheets:
+    if not config.input_excels:
+        raise ZipFlowError("Excelモードでは入力Excelファイルを1件以上指定してください。", exit_code=2)
+    missing_excels = [path for path in config.input_excels if not path.exists()]
+    if missing_excels:
+        raise ZipFlowError(f"入力Excelファイルが見つかりません: {missing_excels[0]}", exit_code=2)
+    if not config.selected_events:
         raise ZipFlowError("Excelモードではイベント候補を1件以上選択してください。", exit_code=2)
     if config.graph_span not in ("5d", "3d_left", "3d_center", "3d_right"):
         raise ZipFlowError(f"未対応の graph_span です: {config.graph_span}", exit_code=2)
@@ -258,8 +330,11 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "excel_mode.log"
     logger = build_logger(enable_file=config.enable_log, log_path=log_path)
-    logger.info("Excelモード実行開始: input=%s", config.input_excel)
-    logger.info("選択シート: %s", list(config.selected_sheets))
+    logger.info("Excelモード実行開始: inputs=%s", [str(p) for p in config.input_excels])
+    logger.info(
+        "選択イベント: %s",
+        [f"[{e.source_alias}] {e.sheet_name}" for e in config.selected_events],
+    )
 
     style_profile = None
     try:
@@ -269,26 +344,27 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
 
     render_span = "5d" if config.graph_span == "5d" else "3d"
     jobs: list[_ExcelRenderJob] = []
-    for sheet_name in config.selected_sheets:
-        base_date = parse_event_sheet_date(sheet_name)
-        if base_date is None:
-            raise ZipFlowError(f"シート名の日付解釈に失敗しました: {sheet_name}", exit_code=5)
+    for selected in config.selected_events:
+        base_date = selected.event_date
         effective_base_date = resolve_effective_base_date(base_date, config.graph_span)
-        frame_src = _load_sheet_series(config.input_excel, sheet_name=sheet_name, base_date=base_date)
+        frame_src = _load_sheet_series(selected.source_path, sheet_name=selected.sheet_name, base_date=base_date)
         observed_at = frame_src["observed_at"].tolist()
         rainfall = frame_src["rainfall_mm"].astype(float).tolist()
         frame_sum = build_metric_frame(observed_at=observed_at, weighted_sum=rainfall)
         frame_mean = build_metric_frame(observed_at=observed_at, weighted_sum=rainfall)
         logger.info(
-            "シート検証OK: %s points=%s range=%s..%s",
-            sheet_name,
+            "シート検証OK: source=%s sheet=%s points=%s range=%s..%s",
+            selected.source_alias,
+            selected.sheet_name,
             len(frame_src),
             frame_src["observed_at"].min(),
             frame_src["observed_at"].max(),
         )
         jobs.append(
             _ExcelRenderJob(
-                sheet_name=sheet_name,
+                source_path=selected.source_path,
+                source_alias=selected.source_alias,
+                sheet_name=selected.sheet_name,
                 base_date=base_date,
                 effective_base_date=effective_base_date,
                 frame_sum=frame_sum,
@@ -308,6 +384,7 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         logger.info("共通軸上限: span=%s kind=%s left_top=%.3f right_top=%.3f", render_span, kind, left_top, right_top)
 
     saved: list[Path] = []
+    saved_png: list[Path] = []
     intermediate_jobs: list[dict[str, object]] = []
     for job in jobs:
         outputs = render_region_plots_reference(
@@ -322,11 +399,12 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
             export_svg=config.export_svg,
             on_conflict=config.on_conflict,
             style=style_profile,
-            filename_prefix="excel_",
+            filename_prefix=build_excel_filename_prefix(job.source_alias),
             axis_tops=axis_tops,
         )
         saved.extend(outputs)
-        logger.info("グラフ出力完了: sheet=%s files=%s", job.sheet_name, len(outputs))
+        saved_png.extend([path for path in outputs if path.suffix.lower() == ".png"])
+        logger.info("グラフ出力完了: source=%s sheet=%s files=%s", job.source_alias, job.sheet_name, len(outputs))
         intermediate_jobs.append(
             {
                 "base_date": job.base_date.strftime("%Y-%m-%d"),
@@ -338,6 +416,8 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
                 "observed_at_jst": [str(ts) for ts in job.frame_sum["observed_at"].tolist()],
                 "weighted_sum_mm": [float(v) for v in job.frame_sum["rainfall_mm"].tolist()],
                 "weighted_mean_mm": [float(v) for v in job.frame_mean["rainfall_mm"].tolist()],
+                "source_path": str(job.source_path),
+                "source_alias": job.source_alias,
                 "source_sheet_name": job.sheet_name,
             }
         )
@@ -352,6 +432,7 @@ def run_excel_mode(config: ExcelRunConfig) -> dict[str, object]:
         "csv_count": 0,
         "cell_csv_count": 0,
         "csv_readme_path": None,
-        "event_count": len(config.selected_sheets),
+        "event_count": len(config.selected_events),
         "intermediate_jobs": intermediate_jobs,
+        "plot_ref_png_paths": [str(path) for path in saved_png],
     }

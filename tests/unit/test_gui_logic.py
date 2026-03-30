@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from uc_rainfall_zipflow.excel_application import resolve_effective_base_date
-from uc_rainfall_zipflow.gui.app import ZipFlowGui
+from uc_rainfall_zipflow.gui.app import (
+    ZipFlowGui,
+    _ensure_gui_help_file_exists,
+    _iter_gui_help_candidates,
+    _load_gui_help_text,
+    _preferred_gui_help_output_path,
+)
 from uc_rainfall_zipflow.gui.rain_mode_panel import RainModePanel
 
 
@@ -171,3 +177,58 @@ def test_build_rain_run_configs_rejects_invalid_engine(
 
     with pytest.raises(ValueError, match="計算エンジンが不正です"):
         ZipFlowGui._build_rain_run_configs(gui)
+
+
+def test_load_gui_help_text_reads_utf8_file(tmp_path: Path) -> None:
+    path = tmp_path / "help.txt"
+    path.write_text("line1\nline2\n", encoding="utf-8")
+
+    text = _load_gui_help_text(path)
+
+    assert text == "line1\nline2"
+
+
+def test_load_gui_help_text_reports_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing_help.txt"
+
+    text = _load_gui_help_text(path)
+
+    assert "ヘルプファイルが見つかりません" in text
+
+
+def test_iter_gui_help_candidates_includes_exe_and_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uc_rainfall_zipflow.gui import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "executable", r"C:\dist\RainfallGraphCreator.exe")
+    monkeypatch.setattr(app_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
+
+    paths = _iter_gui_help_candidates()
+    rendered = [str(p) for p in paths]
+
+    assert str(Path(r"C:\dist\config\uc_rainfall_zipflow\gui_help.txt")) in rendered
+    assert str(Path(r"C:\dist\gui_help.txt")) in rendered
+    assert str(Path(r"C:\work\config\uc_rainfall_zipflow\gui_help.txt")) in rendered
+
+
+def test_preferred_gui_help_output_path_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uc_rainfall_zipflow.gui import app as app_module
+
+    monkeypatch.setattr(app_module, "resolve_path", lambda *parts: Path(r"C:\work").joinpath(*parts))
+    monkeypatch.setattr(app_module.sys, "frozen", False, raising=False)
+
+    path = _preferred_gui_help_output_path()
+
+    assert path == Path(r"C:\work\config\uc_rainfall_zipflow\gui_help.txt")
+
+
+def test_ensure_gui_help_file_exists_creates_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from uc_rainfall_zipflow.gui import app as app_module
+
+    target = tmp_path / "config" / "uc_rainfall_zipflow" / "gui_help.txt"
+    monkeypatch.setattr(app_module, "_preferred_gui_help_output_path", lambda: target)
+
+    created = _ensure_gui_help_file_exists()
+
+    assert created == target
+    assert target.exists()
+    assert "流域雨量グラフ作成 ヘルプ" in target.read_text(encoding="utf-8")

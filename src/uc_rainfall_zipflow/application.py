@@ -554,6 +554,7 @@ def run_zipflow(
         )
 
     plot_paths: list[Path] = []
+    plot_ref_png_paths: list[Path] = []
     plot_frames_by_region: dict[str, dict[str, list[object]]] = {}
     axis_tops_by_region: dict[str, dict[tuple[str, str], tuple[float, float]]] = {}
     if enable_metric_calc:
@@ -628,22 +629,22 @@ def run_zipflow(
                     )
                 if "plots_ref" in config.output_kinds:
                     axis_tops = axis_tops_by_region.get(region.region_key)
-                    plot_paths.extend(
-                        render_region_plots_reference(
-                            frame_sum=frame,
-                            frame_mean=frame_mean,
-                            region_key=region.region_key,
-                            region_label=region.region_name,
-                            output_dir=plot_ref_dir,
-                            base_date=reference_base_date,
-                            graph_spans=config.graph_spans,
-                            ref_graph_kinds=config.ref_graph_kinds,
-                            export_svg=config.export_svg,
-                            on_conflict=config.on_conflict,
-                            style=style_profile,
-                            axis_tops=axis_tops or {},
-                        )
+                    generated_ref = render_region_plots_reference(
+                        frame_sum=frame,
+                        frame_mean=frame_mean,
+                        region_key=region.region_key,
+                        region_label=region.region_name,
+                        output_dir=plot_ref_dir,
+                        base_date=reference_base_date,
+                        graph_spans=config.graph_spans,
+                        ref_graph_kinds=config.ref_graph_kinds,
+                        export_svg=config.export_svg,
+                        on_conflict=config.on_conflict,
+                        style=style_profile,
+                        axis_tops=axis_tops or {},
                     )
+                    plot_paths.extend(generated_ref)
+                    plot_ref_png_paths.extend([path for path in generated_ref if path.suffix.lower() == ".png"])
             except FileExistsError as exc:
                 raise ZipFlowError(
                     f"既存ファイルと衝突したため中断しました: {exc} "
@@ -683,4 +684,5 @@ def run_zipflow(
         "csv_readme_path": str(csv_readme_path) if csv_readme_path else None,
         "axis_tops_by_region": axis_tops_by_region if "plots_ref" in config.output_kinds else {},
         "plot_frames_by_region": plot_frames_by_region if collect_metric_frames else {},
+        "plot_ref_png_paths": [str(path) for path in plot_ref_png_paths],
     }

@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import tkinter as tk
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -20,9 +22,10 @@ import pandas as pd
 from ..errors import ZipFlowError
 from ..excel_application import (
     ExcelRunConfig,
+    ExcelSelectedEvent,
+    build_excel_filename_prefix,
     collect_excel_event_candidates,
     export_excel_event_candidates_csv,
-    parse_event_sheet_date,
     resolve_effective_base_date,
     run_excel_mode,
 )
@@ -39,11 +42,14 @@ from .types import StyleTunerInput
 
 _DATE_FMT = "%Y-%m-%d"
 _GUI_STATE_PATH = resolve_path("config", "uc_rainfall_zipflow", "gui_state.json")
+_GUI_HELP_REL_PATH = Path("config") / "uc_rainfall_zipflow" / "gui_help.txt"
 _SCREENSHOT_DIR = resolve_path("outputs", "_gui_screenshots")
 _GUI_TEST_DIR = resolve_path("outputs", "_gui_test")
 _EXCEL_CANDIDATES_DIR = resolve_path("outputs", "excel_candidates")
 _EXCEL_INPUT_DIR = resolve_path("data", "excel_input")
 _DEV_UI_ENV = "UC_ZIPFLOW_DEV_UI"
+_MERGE_DEFAULT_COLUMNS = 2
+_MERGE_DEFAULT_ROWS = 4
 _RUN_MODES = ("解析雨量データ", "Excelデータ")
 _RUNTIME_ENGINES = ("python", "rust_pyo3")
 
@@ -65,6 +71,136 @@ _GRAPH_KIND_LABELS = {
 }
 _EXCEL_FIXED_REGION_KEYS = ("nishiyoke_higashiyoke",)
 _EXCEL_FIXED_OUTPUT_KINDS = ("plots_ref",)
+_DEFAULT_GUI_HELP_TEXT = """【流域雨量グラフ作成 ヘルプ】
+
+1. モード
+- 解析雨量データ: ZIP入力から流域ごとの出力を作成します。
+- Excelデータ: Excelシート時系列から整形グラフを作成します。
+
+2. 基本操作
+- 入出力欄で入力元と出力先を指定します。
+- 実行設定で対象流域・出力種別・グラフ指標を選びます。
+- 「処理を実行」で出力を開始します。
+
+3. 画像マージ
+- 「実行後に画像マージ」をONにすると、実行完了後に自動でマージします。
+- 「今すぐ画像マージ」で、既存の plots_reference PNG を対象に手動実行できます。
+- 行列は「列数」「行数」で指定します（初期値: 2列 x 4行）。
+- 最後のページに余りがある場合は空欄のまま出力します。
+
+4. グラフスタイル調整
+- 「グラフスタイル調整」で見た目を変更できます。
+- 保存して閉じると、次回実行から反映されます。
+
+5. よくあるエラー
+- 入力ファイルが見つからない:
+  パスを再確認し、読み取り可能な場所を指定してください。
+- Excel期間不一致:
+  シート名日付と時刻列(B列)の期間整合を確認してください。
+- 画像マージ対象なし:
+  先に plots_reference のPNGを出力してください。
+"""
+
+
+@dataclass(frozen=True)
+class A4MergeSpec:
+    columns: int
+    rows: int
+
+
+@dataclass(frozen=True)
+class A4LayoutPlan:
+    cols: int
+    rows: int
+    page_count: int
+    cell_width_px: int
+    cell_height_px: int
+    canvas_width_px: int
+    canvas_height_px: int
+
+
+@dataclass(frozen=True)
+class A4MergeResult:
+    paths: list[Path]
+    plan: A4LayoutPlan
+    warning: str | None
+
+
+def choose_a4_layout_plan(
+    *,
+    image_sizes: list[tuple[int, int]],
+    spec: A4MergeSpec,
+) -> A4LayoutPlan:
+    if not image_sizes:
+        raise ValueError("画像がありません。")
+    if spec.columns <= 0 or spec.rows <= 0:
+        raise ValueError("画像マージ設定が不正です。")
+
+    base_cell_w = max(max(1, int(w)) for w, _ in image_sizes)
+    base_cell_h = max(max(1, int(h)) for _, h in image_sizes)
+    image_count = len(image_sizes)
+
+    cols = int(spec.columns)
+    rows = int(spec.rows)
+    capacity = cols * rows
+    page_count = int(math.ceil(image_count / capacity))
+    return A4LayoutPlan(
+        cols=cols,
+        rows=rows,
+        page_count=page_count,
+        cell_width_px=base_cell_w,
+        cell_height_px=base_cell_h,
+        canvas_width_px=base_cell_w * cols,
+        canvas_height_px=base_cell_h * rows,
+    )
+
+
+def merge_pngs_to_a4(
+    *,
+    input_paths: list[Path],
+    output_dir: Path,
+    spec: A4MergeSpec,
+) -> A4MergeResult:
+    png_paths = [path for path in input_paths if path.suffix.lower() == ".png" and path.exists()]
+    if not png_paths:
+        raise ValueError("マージ対象PNGがありません。")
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("画像マージには Pillow が必要です。`uv add pillow` を実行してください。") from exc
+
+    with ExitStack() as stack:
+        images = [stack.enter_context(Image.open(path)) for path in png_paths]
+        sizes = [(int(img.width), int(img.height)) for img in images]
+    plan = choose_a4_layout_plan(image_sizes=sizes, spec=spec)
+
+    merged_dir = output_dir / f"_merged_{plan.cols}x{plan.rows}"
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    capacity = plan.cols * plan.rows
+    merged_paths: list[Path] = []
+
+    for page_index in range(plan.page_count):
+        start = page_index * capacity
+        chunk = png_paths[start : start + capacity]
+        if not chunk:
+            continue
+        canvas = Image.new("RGB", (plan.canvas_width_px, plan.canvas_height_px), "white")
+        with ExitStack() as stack:
+            page_images = [stack.enter_context(Image.open(path)) for path in chunk]
+            for pos, img in enumerate(page_images):
+                row = pos // plan.cols
+                col = pos % plan.cols
+                cell_x = col * plan.cell_width_px
+                cell_y = row * plan.cell_height_px
+                resized = img.convert("RGB")
+                paste_x = cell_x + max(0, (plan.cell_width_px - resized.width) // 2)
+                paste_y = cell_y + max(0, (plan.cell_height_px - resized.height) // 2)
+                canvas.paste(resized, (paste_x, paste_y))
+        out_path = merged_dir / f"merged_{plan.cols}x{plan.rows}_{page_index + 1:03d}.png"
+        canvas.save(out_path)
+        merged_paths.append(out_path)
+    return A4MergeResult(paths=merged_paths, plan=plan, warning=None)
 
 
 def _parse_date(raw: str, *, field_name: str) -> date:
@@ -104,6 +240,69 @@ def _save_state(state: dict[str, object]) -> None:
     _GUI_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_gui_help_text(path: Path) -> str:
+    if not path.exists():
+        return (
+            "ヘルプファイルが見つかりません。\n\n"
+            f"対象: {path}\n"
+            "管理者に連絡してヘルプファイルを配置してください。"
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        return (
+            "ヘルプファイルの読み込みに失敗しました。\n\n"
+            f"対象: {path}\n"
+            f"詳細: {exc}"
+        )
+    stripped = text.strip()
+    if not stripped:
+        return (
+            "ヘルプファイルが空です。\n\n"
+            f"対象: {path}\n"
+            "ヘルプ内容を記述してください。"
+        )
+    return stripped
+
+
+def _preferred_gui_help_output_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / _GUI_HELP_REL_PATH
+    return resolve_path(*_GUI_HELP_REL_PATH.parts)
+
+
+def _ensure_gui_help_file_exists() -> Path | None:
+    target = _preferred_gui_help_output_path()
+    if target.exists():
+        return target
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_DEFAULT_GUI_HELP_TEXT.strip() + "\n", encoding="utf-8")
+        return target
+    except Exception:
+        return None
+
+
+def _iter_gui_help_candidates() -> list[Path]:
+    exe_dir = Path(sys.executable).resolve().parent
+    return [
+        exe_dir / _GUI_HELP_REL_PATH,
+        exe_dir / "gui_help.txt",
+        resolve_path(*_GUI_HELP_REL_PATH.parts),
+    ]
+
+
+def _load_gui_help_text_from_candidates() -> str:
+    auto_generated = _ensure_gui_help_file_exists()
+    if auto_generated is not None and auto_generated.exists():
+        return _load_gui_help_text(auto_generated)
+    candidates = _iter_gui_help_candidates()
+    for path in candidates:
+        if path.exists():
+            return _load_gui_help_text(path)
+    return _DEFAULT_GUI_HELP_TEXT.strip()
+
+
 def _find_latest_timeseries_csv(*, output_root: Path, region_key: str) -> Path | None:
     if not output_root.exists():
         return None
@@ -128,6 +327,8 @@ class ZipFlowGui:
         self.root.withdraw()
         self.root.title("流域雨量グラフ作成（メインウィンドウ）")
         self.root.minsize(980, 680)
+        self._help_window: tk.Toplevel | None = None
+        self._help_text_widget: tk.Text | None = None
 
         self._state = _load_state()
         self._is_running = False
@@ -143,10 +344,12 @@ class ZipFlowGui:
         self._status_error_fg = "#B71C1C"
         self._saved_rain_region_state: dict[str, bool] | None = None
         self._saved_rain_output_state: dict[str, bool] | None = None
+        self._last_plot_ref_png_paths: list[Path] = []
         self._dev_window: tk.Toplevel | None = None
         self._dev_mode = dev_mode
 
         self._build_vars()
+        self._build_menu_bar()
         self._build_layout()
         self._adjust_layout_for_content()
         self._place_window_initial()
@@ -240,6 +443,9 @@ class ZipFlowGui:
         self.polygon_dir_var = tk.StringVar(value=r"data\大阪狭山市_流域界")
         self.enable_log_var = tk.BooleanVar(value=False)
         self.export_svg_var = tk.BooleanVar(value=False)
+        self.merge_a4_enabled_var = tk.BooleanVar(value=False)
+        self.merge_a4_columns_var = tk.StringVar(value=str(_MERGE_DEFAULT_COLUMNS))
+        self.merge_a4_rows_var = tk.StringVar(value=str(_MERGE_DEFAULT_ROWS))
         self.status_var = tk.StringVar(value="待機中")
         self.updated_var = tk.StringVar(value="最終更新: --")
         self.graph_span_var = tk.StringVar(value="自動判定: 3日")
@@ -335,6 +541,54 @@ class ZipFlowGui:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _build_menu_bar(self) -> None:
+        menubar = tk.Menu(self.root)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="ヘルプを表示", command=self._on_open_help)
+        menubar.add_cascade(label="ヘルプ", menu=help_menu)
+        self.root.configure(menu=menubar)
+
+    def _on_open_help(self) -> None:
+        text = _load_gui_help_text_from_candidates()
+        if self._help_window is not None and self._help_window.winfo_exists():
+            self._help_window.deiconify()
+            self._help_window.lift()
+            body = getattr(self, "_help_text_widget", None)
+            if isinstance(body, tk.Text):
+                body.configure(state=tk.NORMAL)
+                body.delete("1.0", tk.END)
+                body.insert("1.0", text)
+                body.configure(state=tk.DISABLED)
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("ヘルプ")
+        win.transient(self.root)
+        win.geometry("840x620")
+        win.minsize(640, 420)
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        ttk.Label(outer, text="流域雨量グラフ作成 ヘルプ", font=("", 12, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        body_wrap = ttk.Frame(outer)
+        body_wrap.grid(row=1, column=0, sticky="nsew")
+        body_wrap.columnconfigure(0, weight=1)
+        body_wrap.rowconfigure(0, weight=1)
+        body = tk.Text(body_wrap, wrap=tk.WORD, font=("", 10))
+        body.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(body_wrap, orient=tk.VERTICAL, command=body.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        body.configure(yscrollcommand=scroll.set)
+        body.insert("1.0", text)
+        body.configure(state=tk.DISABLED)
+
+        self._help_window = win
+        self._help_text_widget = body
+
     def _build_mode_group(self, parent: ttk.Frame) -> None:
         frm = ttk.LabelFrame(parent, text="モード", padding=10)
         frm.pack(fill=tk.X, pady=(0, 8))
@@ -369,9 +623,9 @@ class ZipFlowGui:
             self.mode_input_container,
             build_path_row=self._path_row,
             input_excel_var=self.input_excel_var,
+            on_log=self._append_log,
         )
         self.input_zip_row = self.rain_panel.input_zip_row
-        self.input_excel_row = self.excel_panel.input_excel_row
         self.polygon_row = self._path_row(
             frm,
             "ポリゴンディレクトリ",
@@ -457,6 +711,16 @@ class ZipFlowGui:
                 padx=(0, 10),
             )
         ttk.Checkbutton(kind_wrap, text="SVGも出力", variable=self.export_svg_var).pack(side=tk.LEFT, padx=(0, 2))
+
+        self.merge_row, merge_wrap = row_block("画像マージ")
+        ttk.Checkbutton(merge_wrap, text="実行後に画像マージ", variable=self.merge_a4_enabled_var).pack(
+            side=tk.LEFT, padx=(0, 10)
+        )
+        ttk.Button(merge_wrap, text="今すぐ画像マージ", command=self._on_merge_a4_clicked).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(merge_wrap, text="列数").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(merge_wrap, width=4, textvariable=self.merge_a4_columns_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(merge_wrap, text="行数").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(merge_wrap, width=4, textvariable=self.merge_a4_rows_var).pack(side=tk.LEFT, padx=(0, 8))
 
     def _build_action_group(self, parent: ttk.Frame) -> None:
         row = ttk.Frame(parent, padding=(0, 2))
@@ -758,7 +1022,7 @@ class ZipFlowGui:
             "input_zipdir": self.input_zipdir_var.get().strip(),
             "input_excel": self.input_excel_var.get().strip(),
             "excel_graph_span": self.excel_panel.get_span(),
-            "excel_selected_sheets": self.excel_panel.get_selected_sheet_names(),
+            "excel_selected_event_keys": self.excel_panel.get_selected_event_keys(),
             "rain_period_input_mode": self.rain_panel.period_input_mode_var.get().strip(),
             "rain_window_mode": self.rain_panel.get_window_mode(),
             "rain_selected_dates": [
@@ -776,6 +1040,9 @@ class ZipFlowGui:
             "ref_graph_kinds": [k for k, v in self.graph_kind_vars.items() if v.get()],
             "enable_log": bool(self.enable_log_var.get()),
             "export_svg": bool(self.export_svg_var.get()),
+            "merge_a4_enabled": bool(self.merge_a4_enabled_var.get()),
+            "merge_a4_columns": self.merge_a4_columns_var.get().strip(),
+            "merge_a4_rows": self.merge_a4_rows_var.get().strip(),
         }
 
     def _apply_loaded_state(self) -> None:
@@ -804,20 +1071,22 @@ class ZipFlowGui:
             self.rain_panel._update_selected_count()
         self.excel_panel.refresh_candidates(self.input_excel_var.get().strip())
         self.excel_panel.span_var.set(str(state.get("excel_graph_span", self.excel_panel.get_span())))
-        selected_excel = set(cast(list[str], state.get("excel_selected_sheets", [])))
-        if selected_excel:
-            self.excel_panel.sheet_listbox.selection_clear(0, tk.END)
-            for i in range(self.excel_panel.sheet_listbox.size()):
-                name = self.excel_panel.sheet_listbox.get(i)
-                if name in selected_excel:
-                    self.excel_panel.sheet_listbox.selection_set(i)
-            self.excel_panel._update_selected_count()
+        selected_excel = set(
+            cast(
+                list[str],
+                state.get("excel_selected_event_keys", state.get("excel_selected_sheets", [])),
+            )
+        )
+        self.excel_panel.select_by_event_keys(selected_excel)
         self.output_dir_var.set(str(state.get("output_dir", self.output_dir_var.get())))
         self.polygon_dir_var.set(str(state.get("polygon_dir", self.polygon_dir_var.get())))
         self.start_date_var.set(str(state.get("period_start", self.start_date_var.get())))
         self.end_date_var.set(str(state.get("period_end", self.end_date_var.get())))
         self.enable_log_var.set(bool(state.get("enable_log", self.enable_log_var.get())))
         self.export_svg_var.set(bool(state.get("export_svg", self.export_svg_var.get())))
+        self.merge_a4_enabled_var.set(bool(state.get("merge_a4_enabled", self.merge_a4_enabled_var.get())))
+        self.merge_a4_columns_var.set(str(state.get("merge_a4_columns", self.merge_a4_columns_var.get())))
+        self.merge_a4_rows_var.set(str(state.get("merge_a4_rows", self.merge_a4_rows_var.get())))
 
         selected_regions = set(cast(list[str], state.get("selected_regions", [])))
         if selected_regions:
@@ -1197,7 +1466,11 @@ class ZipFlowGui:
                 )
                 output_count += len(generated)
                 rendered_paths.extend(generated)
-            merged_paths = self._merge_rendered_pngs_2x4(rendered_paths=rendered_paths, output_dir=output_dir)
+            merge_result = self._merge_plot_ref_pngs_to_a4(
+                png_paths=[p for p in rendered_paths if p.suffix.lower() == ".png"],
+                output_dir=output_dir,
+            )
+            merged_paths = merge_result.paths
             summary = (
                 f"中間JSON再出力: jobs={len(render_jobs)} outputs={output_count} "
                 f"merged={len(merged_paths)} source={json_path}"
@@ -1205,59 +1478,53 @@ class ZipFlowGui:
             self._append_log(
                 summary
             )
+            if merge_result.warning:
+                self._append_log(f"[WARN] {merge_result.warning}")
             messagebox.showinfo(
                 "中間JSON再出力",
                 "再出力が完了しました。\n\n"
                 f"入力: {json_path}\n"
                 f"出力先: {output_dir}\n"
                 f"出力数: {output_count}\n"
-                f"マージ出力数(2x4): {len(merged_paths)}",
+                f"画像マージ出力数: {len(merged_paths)}\n"
+                f"レイアウト: {merge_result.plan.cols}x{merge_result.plan.rows} / "
+                f"pages={merge_result.plan.page_count}",
             )
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"[ERROR] 中間JSON再出力失敗: {exc}")
             messagebox.showerror("中間JSON再出力エラー", str(exc))
 
-    def _merge_rendered_pngs_2x4(self, *, rendered_paths: list[Path], output_dir: Path) -> list[Path]:
-        png_paths = [path for path in rendered_paths if path.suffix.lower() == ".png"]
-        if not png_paths:
-            return []
+    def _build_a4_merge_spec(self) -> A4MergeSpec:
         try:
-            from PIL import Image
-        except ImportError as exc:
-            raise RuntimeError("画像マージには Pillow が必要です。`uv add pillow` を実行してください。") from exc
+            columns = int(float(self.merge_a4_columns_var.get().strip()))
+            rows = int(float(self.merge_a4_rows_var.get().strip()))
+        except ValueError as exc:
+            raise ValueError("画像マージ設定（列数/行数）の形式が不正です。") from exc
+        if columns <= 0:
+            raise ValueError("画像マージ設定の列数は1以上で指定してください。")
+        if rows <= 0:
+            raise ValueError("画像マージ設定の行数は1以上で指定してください。")
+        return A4MergeSpec(columns=columns, rows=rows)
 
-        merged_dir = output_dir / "_merged_2x4"
-        merged_dir.mkdir(parents=True, exist_ok=True)
-        merged_paths: list[Path] = []
-
-        for index in range(0, len(png_paths), 8):
-            chunk = png_paths[index : index + 8]
-            if not chunk:
-                continue
-            with ExitStack() as stack:
-                images = [stack.enter_context(Image.open(path)) for path in chunk]
-                cell_width = max(img.width for img in images)
-                cell_height = max(img.height for img in images)
-                canvas = Image.new("RGB", (cell_width * 2, cell_height * 4), "white")
-                for pos, img in enumerate(images):
-                    row = pos // 2
-                    col = pos % 2
-                    x = col * cell_width + max(0, (cell_width - img.width) // 2)
-                    y = row * cell_height + max(0, (cell_height - img.height) // 2)
-                    canvas.paste(img.convert("RGB"), (x, y))
-            out_path = merged_dir / f"merged_2x4_{(index // 8) + 1:03d}.png"
-            canvas.save(out_path)
-            merged_paths.append(out_path)
-        return merged_paths
+    def _merge_plot_ref_pngs_to_a4(self, *, png_paths: list[Path], output_dir: Path) -> A4MergeResult:
+        spec = self._build_a4_merge_spec()
+        return merge_pngs_to_a4(
+            input_paths=png_paths,
+            output_dir=output_dir,
+            spec=spec,
+        )
 
     def _on_export_excel_candidates_csv(self) -> None:
-        excel_path = self.input_excel_var.get().strip()
-        if not excel_path:
-            messagebox.showerror("入力エラー", "Excelモードでは入力Excelファイルを指定してください。")
+        excel_paths = self.excel_panel.get_input_excel_paths()
+        if not excel_paths:
+            messagebox.showerror("入力エラー", "Excel候補日CSV出力では入力Excelファイルを指定してください。")
             return
-        input_excel = Path(excel_path)
+        if len(excel_paths) != 1:
+            messagebox.showerror("入力エラー", "Excel候補日CSV出力は1ファイルずつ実行してください。")
+            return
+        input_excel = excel_paths[0]
         if not input_excel.exists():
-            messagebox.showerror("入力エラー", f"入力Excelファイルが見つかりません: {excel_path}")
+            messagebox.showerror("入力エラー", f"入力Excelファイルが見つかりません: {input_excel}")
             return
 
         output_all_csv = _EXCEL_CANDIDATES_DIR / f"{input_excel.stem}_候補日付リスト.csv"
@@ -1375,18 +1642,25 @@ class ZipFlowGui:
         return [config], day_count
 
     def _validate_excel_for_run(self) -> ExcelRunConfig:
-        excel_path = self.input_excel_var.get().strip()
-        if not excel_path:
-            raise ValueError("Excelモードでは入力Excelファイルを指定してください。")
-        input_excel = Path(excel_path)
-        if not input_excel.exists():
-            raise ValueError(f"入力Excelファイルが見つかりません: {excel_path}")
-        selected = tuple(self.excel_panel.get_selected_sheet_names())
-        if not selected:
+        input_excels = tuple(self.excel_panel.get_input_excel_paths())
+        if not input_excels:
+            raise ValueError("Excelモードでは入力Excelファイルを1件以上指定してください。")
+        missing = [p for p in input_excels if not p.exists()]
+        if missing:
+            raise ValueError(f"入力Excelファイルが見つかりません: {missing[0]}")
+        selected_ui = self.excel_panel.get_selected_events()
+        if not selected_ui:
             raise ValueError("Excelモードではイベント候補を1件以上選択してください。")
-        for sheet_name in selected:
-            if parse_event_sheet_date(sheet_name) is None:
-                raise ValueError(f"日付解釈できないシート名が含まれています: {sheet_name}")
+        selected_events = tuple(
+            ExcelSelectedEvent(
+                source_path=item.source_path,
+                source_alias=item.source_alias,
+                sheet_name=item.sheet_name,
+                event_date=item.event_date,
+                is_resplit=item.is_resplit,
+            )
+            for item in selected_ui
+        )
         graph_kinds = tuple(k for k, v in self.graph_kind_vars.items() if v.get())
         if not graph_kinds:
             raise ValueError("グラフ指標を1つ以上選択してください。")
@@ -1396,9 +1670,9 @@ class ZipFlowGui:
         default_style_path = default_style_profile_path()
         style_path = default_style_path if default_style_path.exists() else None
         return ExcelRunConfig(
-            input_excel=input_excel,
+            input_excels=input_excels,
             output_root=Path(self.output_dir_var.get().strip()),
-            selected_sheets=selected,
+            selected_events=selected_events,
             graph_span=span,
             ref_graph_kinds=graph_kinds,
             export_svg=bool(self.export_svg_var.get()),
@@ -1409,11 +1683,8 @@ class ZipFlowGui:
 
     def _resolve_conflict_policy_for_excel(self, config: ExcelRunConfig) -> str | None:
         expected: list[Path] = []
-        for sheet_name in config.selected_sheets:
-            base = parse_event_sheet_date(sheet_name)
-            if base is None:
-                continue
-            base_effective = resolve_effective_base_date(base, config.graph_span)
+        for event in config.selected_events:
+            base_effective = resolve_effective_base_date(event.event_date, config.graph_span)
             expected.extend(
                 build_reference_output_paths(
                     output_dir=config.output_root / "plots_reference",
@@ -1422,7 +1693,7 @@ class ZipFlowGui:
                     graph_spans=("5d" if config.graph_span == "5d" else "3d",),
                     ref_graph_kinds=config.ref_graph_kinds,
                     export_svg=config.export_svg,
-                    filename_prefix="excel_",
+                    filename_prefix=build_excel_filename_prefix(event.source_alias),
                 )
             )
         conflicts = [p for p in expected if p.exists()]
@@ -1524,10 +1795,10 @@ class ZipFlowGui:
         span_label = self.excel_panel.get_span_label()
         kind_labels = [str(_GRAPH_KIND_LABELS.get(k, k)) for k in config.ref_graph_kinds]
         lines: list[str] = []
-        for sheet_name in config.selected_sheets:
-            event_date = parse_event_sheet_date(sheet_name)
-            date_text = event_date.strftime("%Y-%m-%d") if event_date is not None else "日付解釈不可"
-            lines.append(f"- {sheet_name} ({date_text})")
+        for event in config.selected_events:
+            lines.append(
+                f"- [{event.source_alias}] {event.sheet_name} ({event.event_date:%Y-%m-%d})"
+            )
         preview = "\n".join(lines[:20])
         if len(lines) > 20:
             preview += f"\n... 他 {len(lines) - 20} 件"
@@ -1535,7 +1806,8 @@ class ZipFlowGui:
             messagebox.askyesno(
                 "Excelモード実行確認",
                 "以下のイベントで実行します。\n\n"
-                f"件数: {len(config.selected_sheets)} 件\n"
+                f"件数: {len(config.selected_events)} 件\n"
+                f"入力Excel数: {len(config.input_excels)} 件\n"
                 f"グラフ期間: {span_label}\n"
                 f"グラフ指標: {', '.join(kind_labels)}\n\n"
                 f"{preview}\n\n"
@@ -1567,6 +1839,91 @@ class ZipFlowGui:
         )
         return out_path
 
+    def _extract_plot_ref_png_paths_from_result(self, result: dict[str, object]) -> list[Path]:
+        raw = result.get("plot_ref_png_paths")
+        paths: list[Path] = []
+        if isinstance(raw, list):
+            for value in raw:
+                if not isinstance(value, str):
+                    continue
+                path = Path(value)
+                if path.suffix.lower() != ".png":
+                    continue
+                if path.exists():
+                    paths.append(path)
+        return paths
+
+    def _list_plot_ref_png_paths_from_output_dir(self) -> list[Path]:
+        root = Path(self.output_dir_var.get().strip() or ".") / "plots_reference"
+        if not root.exists():
+            return []
+        files = [p for p in root.glob("*.png") if p.is_file()]
+        files.sort(key=lambda path: path.name)
+        return files
+
+    def _resolve_latest_plot_ref_png_paths(self) -> list[Path]:
+        if self._last_plot_ref_png_paths:
+            existing = [p for p in self._last_plot_ref_png_paths if p.exists() and p.suffix.lower() == ".png"]
+            if existing:
+                return existing
+        return self._list_plot_ref_png_paths_from_output_dir()
+
+    def _run_a4_merge_and_attach(
+        self,
+        *,
+        result: dict[str, object],
+        png_paths: list[Path],
+        output_dir: Path,
+    ) -> dict[str, object]:
+        merged = self._merge_plot_ref_pngs_to_a4(png_paths=png_paths, output_dir=output_dir)
+        result["merged_a4_count"] = len(merged.paths)
+        result["merged_a4_dir"] = str(output_dir / f"_merged_{merged.plan.cols}x{merged.plan.rows}")
+        result["merged_a4_layout"] = f"{merged.plan.cols}x{merged.plan.rows}"
+        result["merged_a4_pages"] = int(merged.plan.page_count)
+        if merged.warning:
+            result["merged_a4_warning"] = merged.warning
+        self._append_log(
+            "画像マージ完了: "
+            f"pages={merged.plan.page_count} layout={merged.plan.cols}x{merged.plan.rows} "
+            f"outputs={len(merged.paths)}"
+        )
+        if merged.warning:
+            self._append_log(f"[WARN] {merged.warning}")
+        return result
+
+    def _on_merge_a4_clicked(self) -> None:
+        if self._is_running:
+            messagebox.showwarning("実行中", "処理実行中は画像マージを開始できません。")
+            return
+        png_paths = self._resolve_latest_plot_ref_png_paths()
+        if not png_paths:
+            messagebox.showerror("入力エラー", "plots_reference のPNGが見つかりません。先にグラフを出力してください。")
+            return
+        output_dir = png_paths[0].parent
+        try:
+            merged = self._merge_plot_ref_pngs_to_a4(png_paths=png_paths, output_dir=output_dir)
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"[ERROR] 画像マージ失敗: {exc}")
+            messagebox.showerror("画像マージ失敗", str(exc))
+            return
+        self._append_log(
+            "画像マージ(手動): "
+            f"inputs={len(png_paths)} outputs={len(merged.paths)} "
+            f"layout={merged.plan.cols}x{merged.plan.rows} pages={merged.plan.page_count}"
+        )
+        if merged.warning:
+            self._append_log(f"[WARN] {merged.warning}")
+        message = (
+            "画像マージが完了しました。\n\n"
+            f"入力PNG: {len(png_paths)}\n"
+            f"出力ページ: {len(merged.paths)}\n"
+            f"レイアウト: {merged.plan.cols}x{merged.plan.rows}\n"
+            f"出力先: {output_dir / f'_merged_{merged.plan.cols}x{merged.plan.rows}'}"
+        )
+        if merged.warning:
+            message += f"\n\n警告: {merged.warning}"
+        messagebox.showinfo("画像マージ完了", message)
+
     def _on_run_clicked(self) -> None:
         if self._is_running:
             return
@@ -1592,14 +1949,16 @@ class ZipFlowGui:
             self._set_status("実行中")
             self._update_graph_span_label()
             self._append_log(
-                f"実行開始(Excel): sheets={list(excel_config.selected_sheets)} "
+                f"実行開始(Excel): events={len(excel_config.selected_events)} "
+                f"inputs={len(excel_config.input_excels)} "
                 f"span={excel_config.graph_span} graph_kinds={list(excel_config.ref_graph_kinds)}"
             )
             _save_state(self._collect_state_payload())
 
             def excel_worker() -> None:
                 result: dict[str, object] | None = None
-                error_text: str | None = None
+                error_log_text: str | None = None
+                error_dialog_text: str | None = None
                 try:
                     result = run_excel_mode(excel_config)
                     jobs_raw = result.get("intermediate_jobs", []) if isinstance(result, dict) else []
@@ -1612,26 +1971,40 @@ class ZipFlowGui:
                         )
                         result["intermediate_json_path"] = str(out_json)
                 except ZipFlowError as exc:
-                    error_text = f"[ERROR] {exc}"
+                    error_log_text = f"[ERROR] {exc}"
+                    error_dialog_text = str(exc)
                 except Exception as exc:  # noqa: BLE001
-                    error_text = f"[ERROR] 想定外エラー: {exc}"
+                    error_log_text = f"[ERROR] 想定外エラー: {exc}"
+                    error_dialog_text = f"想定外エラーが発生しました。\n{exc}"
 
                 def done() -> None:
                     self._is_running = False
                     self._update_graph_span_label()
-                    if error_text is not None:
+                    if error_dialog_text is not None:
                         self._set_status("失敗", is_error=True)
-                        self._append_log(error_text)
-                        messagebox.showerror("実行失敗", error_text)
+                        self._append_log(error_log_text or f"[ERROR] {error_dialog_text}")
+                        messagebox.showerror("実行失敗", error_dialog_text)
                         return
-                    assert result is not None
-                    self._last_result = result
+                    result_data = result
+                    assert result_data is not None
+                    plot_ref_png_paths = self._extract_plot_ref_png_paths_from_result(result_data)
+                    self._last_plot_ref_png_paths = plot_ref_png_paths
+                    if self.merge_a4_enabled_var.get() and plot_ref_png_paths:
+                        try:
+                            result_data = self._run_a4_merge_and_attach(
+                                result=result_data,
+                                png_paths=plot_ref_png_paths,
+                                output_dir=plot_ref_png_paths[0].parent,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            self._append_log(f"[ERROR] 画像マージ失敗(自動): {exc}")
+                    self._last_result = result_data
                     self._set_status("完了")
                     self._append_log("実行完了")
-                    self._set_summary(self._format_summary(result))
-                    if result.get("intermediate_json_path"):
-                        self._append_log(f"中間JSON出力(Excel): {result['intermediate_json_path']}")
-                    messagebox.showinfo("実行完了", self._build_completion_message(result, mode="Excelデータ"))
+                    self._set_summary(self._format_summary(result_data))
+                    if result_data.get("intermediate_json_path"):
+                        self._append_log(f"中間JSON出力(Excel): {result_data['intermediate_json_path']}")
+                    messagebox.showinfo("実行完了", self._build_completion_message(result_data, mode="Excelデータ"))
 
                 self.root.after(0, done)
 
@@ -1675,6 +2048,7 @@ class ZipFlowGui:
         def worker() -> None:
             result: dict[str, object] | None = None
             error_text: str | None = None
+            collected_plot_ref_png_paths: list[Path] = []
 
             def emit_log(message: str) -> None:
                 self.root.after(0, lambda m=message: self._append_log(m))
@@ -1709,6 +2083,7 @@ class ZipFlowGui:
                         preloaded_regions=regions_cache[cfg.polygon_dir.resolve()],
                         collect_metric_frames="plots_ref" in cfg.output_kinds,
                     )
+                    collected_plot_ref_png_paths = self._extract_plot_ref_png_paths_from_result(result)
                     if "plots_ref" in cfg.output_kinds:
                         frame_payload_raw = result.get("plot_frames_by_region")
                         if not isinstance(frame_payload_raw, dict):
@@ -1752,6 +2127,7 @@ class ZipFlowGui:
                     plot_jobs: list[dict[str, Any]] = []
                     intermediate_by_root: dict[Path, list[dict[str, Any]]] = {}
                     requested_plot_ref_any = False
+                    generated_plot_ref_png_paths: list[Path] = []
 
                     for idx, cfg in enumerate(configs_with_policy, start=1):
                         emit_log(
@@ -1890,9 +2266,13 @@ class ZipFlowGui:
                                 axis_tops=axis_tops,
                             )
                             agg_plot += len(generated)
+                            generated_plot_ref_png_paths.extend(
+                                [path for path in generated if path.suffix.lower() == ".png"]
+                            )
                         for root_dir, jobs in intermediate_by_root.items():
                             out_json = self._write_intermediate_json(output_root=root_dir.parent, jobs=jobs)
                             emit_log(f"中間JSON出力: {out_json}")
+                    collected_plot_ref_png_paths = generated_plot_ref_png_paths
 
                     if requested_plot_ref_any and agg_plot <= 0:
                         raise ZipFlowError(
@@ -1909,10 +2289,14 @@ class ZipFlowGui:
                         "log_path": last_log_path,
                         "csv_readme_path": None,
                     }
+                    if collected_plot_ref_png_paths:
+                        result["plot_ref_png_paths"] = [str(path) for path in collected_plot_ref_png_paths]
             except ZipFlowError as exc:
-                error_text = f"[ERROR] {exc}"
+                error_text = str(exc)
+                self._append_log(f"[ERROR] {exc}")
             except Exception as exc:  # noqa: BLE001
-                error_text = f"[ERROR] 想定外エラー: {exc}"
+                error_text = f"想定外エラーが発生しました。\n{exc}"
+                self._append_log(f"[ERROR] 想定外エラー: {exc}")
             finally:
                 if style_snapshot_dir is not None:
                     shutil.rmtree(style_snapshot_dir, ignore_errors=True)
@@ -1922,16 +2306,27 @@ class ZipFlowGui:
                 self._update_graph_span_label()
                 if error_text is not None:
                     self._set_status("失敗", is_error=True)
-                    self._append_log(error_text)
                     messagebox.showerror("実行失敗", error_text)
                     return
-                assert result is not None
-                self._last_result = result
+                result_data = result
+                assert result_data is not None
+                resolved_paths = self._extract_plot_ref_png_paths_from_result(result_data)
+                self._last_plot_ref_png_paths = resolved_paths
+                if self.merge_a4_enabled_var.get() and resolved_paths:
+                    try:
+                        result_data = self._run_a4_merge_and_attach(
+                            result=result_data,
+                            png_paths=resolved_paths,
+                            output_dir=resolved_paths[0].parent,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._append_log(f"[ERROR] 画像マージ失敗(自動): {exc}")
+                self._last_result = result_data
                 self._set_status("完了")
                 self._append_log("実行完了")
-                self._set_summary(self._format_summary(result))
+                self._set_summary(self._format_summary(result_data))
                 self._set_auto_tuner_csv()
-                messagebox.showinfo("実行完了", self._build_completion_message(result, mode="解析雨量データ"))
+                messagebox.showinfo("実行完了", self._build_completion_message(result_data, mode="解析雨量データ"))
 
             self.root.after(0, done)
 
@@ -1977,6 +2372,14 @@ class ZipFlowGui:
                 lines.append(f"ログ: {result['log_path']}")
             if result.get("intermediate_json_path"):
                 lines.append(f"中間JSON: {result['intermediate_json_path']}")
+            if result.get("merged_a4_count") is not None:
+                lines.append(
+                    "画像マージ: "
+                    f"{result.get('merged_a4_count')}ページ "
+                    f"(layout={result.get('merged_a4_layout')})"
+                )
+                if result.get("merged_a4_warning"):
+                    lines.append(f"警告: {result.get('merged_a4_warning')}")
             return "\n".join(lines)
         lines = [
             f"出力先: {result.get('base_dir')}",
@@ -1988,6 +2391,14 @@ class ZipFlowGui:
             lines.append(f"ログ: {result['log_path']}")
         if result.get("csv_readme_path"):
             lines.append(f"CSV説明: {result['csv_readme_path']}")
+        if result.get("merged_a4_count") is not None:
+            lines.append(
+                "画像マージ: "
+                f"{result.get('merged_a4_count')}ページ "
+                f"(layout={result.get('merged_a4_layout')})"
+            )
+            if result.get("merged_a4_warning"):
+                lines.append(f"警告: {result.get('merged_a4_warning')}")
         return "\n".join(lines)
 
     def _build_completion_message(self, result: dict[str, object], *, mode: str) -> str:
@@ -2002,6 +2413,14 @@ class ZipFlowGui:
                 lines.append(f"ログ: {result.get('log_path')}")
             if result.get("intermediate_json_path"):
                 lines.append(f"中間JSON: {result.get('intermediate_json_path')}")
+            if result.get("merged_a4_count") is not None:
+                lines.append(
+                    "画像マージ: "
+                    f"{result.get('merged_a4_count')}ページ "
+                    f"(layout={result.get('merged_a4_layout')})"
+                )
+                if result.get("merged_a4_warning"):
+                    lines.append(f"警告: {result.get('merged_a4_warning')}")
             return "\n".join(lines)
         lines = [
             "処理が完了しました。",
@@ -2013,6 +2432,14 @@ class ZipFlowGui:
         ]
         if result.get("log_path"):
             lines.append(f"ログ: {result.get('log_path')}")
+        if result.get("merged_a4_count") is not None:
+            lines.append(
+                "画像マージ: "
+                f"{result.get('merged_a4_count')}ページ "
+                f"(layout={result.get('merged_a4_layout')})"
+            )
+            if result.get("merged_a4_warning"):
+                lines.append(f"警告: {result.get('merged_a4_warning')}")
         return "\n".join(lines)
 
     def _on_pick_tuner_csv(self) -> None:
