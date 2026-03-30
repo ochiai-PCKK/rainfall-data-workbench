@@ -24,6 +24,13 @@ from .types import StyleTunerInput
 
 _GRID_Y_FIXED_COLOR = "#D0D0D0"
 _GRID_X_FIXED_COLOR = "#9A9A9A"
+_DATE_LABEL_FORMAT_OPTIONS = (
+    "%Y.%m.%d",
+    "%Y-%m-%d",
+    "%m/%d",
+    "%m-%d",
+    "%d/%m",
+)
 
 
 def _decimal_places(step: float) -> int:
@@ -46,12 +53,17 @@ def _parse_tick_hours_list(raw: str) -> list[int]:
             hour = int(item)
         except ValueError as exc:
             raise ValueError(f"時刻表示リストに整数以外が含まれています: {item}") from exc
-        if hour < 0 or hour > 23:
-            raise ValueError(f"時刻は0〜23で指定してください: {hour}")
+        if hour < 1 or hour > 24:
+            raise ValueError(f"時刻は1〜24で指定してください: {hour}")
         values.append(hour)
     if len(set(values)) != len(values):
         raise ValueError("時刻表示リストに重複があります。")
     return sorted(values)
+
+
+def _normalize_date_label_format(raw: str) -> str:
+    value = raw.strip()
+    return value if value in _DATE_LABEL_FORMAT_OPTIONS else "%Y.%m.%d"
 
 
 def _profile_from_vars(vars_map: dict[str, tk.Variable]) -> GraphStyleProfile:
@@ -63,7 +75,7 @@ def _profile_from_vars(vars_map: dict[str, tk.Variable]) -> GraphStyleProfile:
             payload[key] = _parse_tick_hours_list(str(value))
             continue
         if key == "x_date_label_format":
-            payload[key] = str(value)
+            payload[key] = _normalize_date_label_format(str(value))
             continue
         if isinstance(default, bool):
             payload[key] = bool(value)
@@ -218,6 +230,7 @@ def launch_style_tuner(
         "table_row_top_y": tk.DoubleVar(value=profile.table_row_top_y),
         "table_row_bottom_y": tk.DoubleVar(value=profile.table_row_bottom_y),
         "table_vertical_linewidth": tk.DoubleVar(value=profile.table_vertical_linewidth),
+        "day_boundary_offset_hours": tk.DoubleVar(value=profile.day_boundary_offset_hours),
         "grid_y_visible": tk.BooleanVar(value=profile.grid_y_visible),
         "grid_y_linewidth": tk.DoubleVar(value=profile.grid_y_linewidth),
         "grid_y_color": tk.StringVar(value=_GRID_Y_FIXED_COLOR),
@@ -259,6 +272,7 @@ def launch_style_tuner(
         ("table_row_top_y", "テーブル上段位置", 1.0, 1.95, 0.02),
         ("table_row_bottom_y", "テーブル下段位置", 0.05, 0.95, 0.02),
         ("table_vertical_linewidth", "テーブル縦線の太さ", 0.2, 2.0, 0.05),
+        ("day_boundary_offset_hours", "日付境界オフセット(h)", -2.0, 2.0, 0.1),
         ("grid_y_linewidth", "横グリッド線幅", 0.1, 2.0, 0.05),
         ("grid_y_alpha", "横グリッド透過", 0.1, 1.0, 0.05),
         ("grid_x_linewidth", "縦グリッド線幅", 0.1, 2.0, 0.05),
@@ -602,8 +616,8 @@ def launch_style_tuner(
         schedule_redraw(delay_ms=0)
 
     def _on_x_date_label_format_commit(_event=None) -> None:
-        raw = str(vars_map["x_date_label_format"].get()).strip()
-        vars_map["x_date_label_format"].set(raw if raw else "%Y.%m.%d")
+        raw = str(vars_map["x_date_label_format"].get())
+        vars_map["x_date_label_format"].set(_normalize_date_label_format(raw))
         _push_history_state()
         schedule_redraw(delay_ms=0)
 
@@ -739,7 +753,7 @@ def launch_style_tuner(
 
     x_axis_row = ttk.Frame(settings_inner)
     x_axis_row.pack(fill=tk.X, pady=(4, 2))
-    ttk.Label(x_axis_row, text="時刻表示(0-23)", width=14).pack(side=tk.LEFT)
+    ttk.Label(x_axis_row, text="時刻表示(1-24)", width=14).pack(side=tk.LEFT)
     x_tick_entry = ttk.Entry(x_axis_row, width=18, textvariable=vars_map["x_tick_hours_list"])
     x_tick_entry.pack(side=tk.LEFT, padx=(0, 8))
     x_tick_entry.bind("<Return>", _on_x_tick_hours_commit)
@@ -749,11 +763,16 @@ def launch_style_tuner(
     x_format_row = ttk.Frame(settings_inner)
     x_format_row.pack(fill=tk.X, pady=(0, 6))
     ttk.Label(x_format_row, text="日付表示書式", width=14).pack(side=tk.LEFT)
-    x_date_format_entry = ttk.Entry(x_format_row, width=18, textvariable=vars_map["x_date_label_format"])
-    x_date_format_entry.pack(side=tk.LEFT, padx=(0, 8))
-    x_date_format_entry.bind("<Return>", _on_x_date_label_format_commit)
-    x_date_format_entry.bind("<FocusOut>", _on_x_date_label_format_commit)
-    ttk.Label(x_format_row, text="例: %Y.%m.%d").pack(side=tk.LEFT)
+    vars_map["x_date_label_format"].set(_normalize_date_label_format(str(vars_map["x_date_label_format"].get())))
+    x_date_format_combo = ttk.Combobox(
+        x_format_row,
+        width=16,
+        state="readonly",
+        values=_DATE_LABEL_FORMAT_OPTIONS,
+        textvariable=vars_map["x_date_label_format"],
+    )
+    x_date_format_combo.pack(side=tk.LEFT, padx=(0, 8))
+    x_date_format_combo.bind("<<ComboboxSelected>>", _on_x_date_label_format_commit)
 
     for key, label, vmin, vmax, _step in all_controls:
         frm = ttk.Frame(settings_inner)

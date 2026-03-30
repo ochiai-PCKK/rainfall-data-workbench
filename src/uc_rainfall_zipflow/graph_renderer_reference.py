@@ -23,9 +23,17 @@ _DEFAULT_LEFT_TOP = 60.0
 _DEFAULT_RIGHT_TOP = 300.0
 
 
-def _resolve_tick_hours(values: list[int]) -> list[int]:
-    unique_sorted = sorted({int(v) for v in values if 0 <= int(v) <= 23})
-    return unique_sorted if unique_sorted else [6, 12, 18]
+def _resolve_tick_hours(values: list[int]) -> list[tuple[int, int]]:
+    resolved: dict[int, int] = {}
+    for raw in values:
+        display_hour = int(raw)
+        if display_hour < 1 or display_hour > 24:
+            continue
+        internal_hour = display_hour % 24
+        resolved[internal_hour] = display_hour
+    if not resolved:
+        resolved = {6: 6, 12: 12, 18: 18}
+    return sorted(((display, internal) for internal, display in resolved.items()), key=lambda item: item[1])
 
 
 def _ceil_nice(value: float, step: float) -> float:
@@ -194,8 +202,10 @@ def draw_reference_chart(
     start_day = pd.Timestamp(times.min()).normalize()
     end_day = pd.Timestamp(times.max()).normalize() + pd.Timedelta(days=1)
     day_boundaries = pd.date_range(start_day, end_day, freq="D")
+    boundary_offset = pd.Timedelta(hours=float(cfg.day_boundary_offset_hours))
+    shifted_day_boundaries = day_boundaries + boundary_offset
     if cfg.grid_x_visible:
-        for boundary in day_boundaries[1:-1]:
+        for boundary in shifted_day_boundaries[1:-1]:
             ax1.axvline(
                 boundary,
                 color=cfg.grid_x_color,
@@ -209,7 +219,7 @@ def draw_reference_chart(
     ax_tbl.set_yticks([])
     ax_tbl.set_xlim(xmin, xmax)
     ax_tbl.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
-    for boundary in day_boundaries[1:-1]:
+    for boundary in shifted_day_boundaries[1:-1]:
         ax_tbl.vlines(boundary, ymin=0.0, ymax=2.0, colors="black", linewidth=cfg.table_vertical_linewidth)
     ax_tbl.vlines(
         [xmin, xmax],
@@ -227,12 +237,13 @@ def draw_reference_chart(
 
     all_hours = pd.date_range(start_day, end_day, freq="h")
     tick_hours = _resolve_tick_hours(cfg.x_tick_hours_list)
-    hour_ticks = [t for t in all_hours if t.hour in tick_hours and xmin <= t <= xmax]
+    tick_label_by_hour = {internal: display for display, internal in tick_hours}
+    hour_ticks = [t for t in all_hours if t.hour in tick_label_by_hour and xmin <= t <= xmax]
     for tick in hour_ticks:
         ax_tbl.text(
             tick,
             cfg.table_row_top_y,
-            f"{tick.hour}",
+            f"{tick_label_by_hour[int(tick.hour)]}",
             ha="center",
             va="center",
             fontsize=cfg.tick_fontsize,

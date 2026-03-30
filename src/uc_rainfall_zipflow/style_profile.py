@@ -21,7 +21,10 @@ def _coerce_x_tick_hours_list(value: Any) -> list[int]:
             hour = int(item)
         except (TypeError, ValueError):
             continue
-        if 0 <= hour <= 23:
+        if hour == 0:
+            # 旧設定（0時指定）を 24 時に読み替える。
+            hour = 24
+        if 1 <= hour <= 24:
             values.append(hour)
     unique_sorted = sorted(set(values))
     return unique_sorted if unique_sorted else [6, 12, 18]
@@ -61,6 +64,7 @@ class GraphStyleProfile:
     table_row_top_y: float = 1.5
     table_row_bottom_y: float = 0.38
     table_vertical_linewidth: float = 0.8
+    day_boundary_offset_hours: float = 0.0
     grid_y_visible: bool = True
     grid_y_linewidth: float = 0.6
     grid_y_color: str = "gray"

@@ -171,7 +171,7 @@ def test_draw_reference_chart_applies_x_axis_settings() -> None:
     frame = build_metric_frame(observed_at=observed_at, weighted_sum=rainfall)
     window = prepare_reference_window(frame)
     style = GraphStyleProfile(
-        x_tick_hours_list=[6, 12, 18],
+        x_tick_hours_list=[6, 12, 24],
         x_date_label_format="%m/%d",
         x_margin_hours_left=1.0,
         x_margin_hours_right=2.0,
@@ -189,8 +189,23 @@ def test_draw_reference_chart_applies_x_axis_settings() -> None:
     hour_texts = [t.get_text() for t in ax_tbl.texts if t.get_position()[1] == style.table_row_top_y]
     assert "6" in hour_texts
     assert "12" in hour_texts
-    assert "18" in hour_texts
-    assert "3" not in hour_texts
+    assert "24" in hour_texts
+    assert "18" not in hour_texts
 
     day_texts = [t.get_text() for t in ax_tbl.texts if t.get_position()[1] == style.table_row_bottom_y]
     assert any("/" in txt for txt in day_texts)
+
+
+def test_draw_reference_chart_applies_day_boundary_offset_hours() -> None:
+    observed_at = [datetime(2024, 1, 1) + timedelta(hours=i) for i in range(120)]
+    rainfall = [0.0] * 120
+    frame = build_metric_frame(observed_at=observed_at, weighted_sum=rainfall)
+    window = prepare_reference_window(frame)
+    style = GraphStyleProfile(day_boundary_offset_hours=0.5)
+    fig = draw_reference_chart(window=window, title="test", style=style, left_top=None, right_top=None, figure=None)
+    ax1 = fig.axes[0]
+
+    boundary_lines = [line for line in ax1.lines if line.get_linestyle() == ":"]
+    xs = [pd.Timestamp(line.get_xdata()[0]) for line in boundary_lines]
+    expected = pd.Timestamp("2024-01-02 00:30:00")
+    assert expected in xs
