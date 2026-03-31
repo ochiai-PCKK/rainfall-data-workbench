@@ -127,7 +127,7 @@ jobs:
           if ($items.Count -eq 0) {
             throw "dist directory is empty."
           }
-          $zipName = "rainfall-data-workbench-${{ steps.resolve_tag.outputs.version }}-windows.zip"
+          $zipName = "RainfallGraphCreator_v${{ steps.resolve_tag.outputs.version }}.zip"
           if (Test-Path $zipName) {
             Remove-Item $zipName -Force
           }

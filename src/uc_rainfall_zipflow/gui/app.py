@@ -78,24 +78,8 @@ _EXCEL_FIXED_REGION_KEYS = ("nishiyoke_higashiyoke",)
 _EXCEL_FIXED_OUTPUT_KINDS = ("plots_ref",)
 
 
-def _load_gui_help_text(path: Path) -> str:
-    return _help_service._load_gui_help_text(path)
-
-
-def _preferred_gui_help_output_path() -> Path:
-    return _help_service._preferred_gui_help_output_path()
-
-
-def _ensure_gui_help_file_exists() -> Path | None:
-    return _help_service._ensure_gui_help_file_exists()
-
-
-def _iter_gui_help_candidates() -> list[Path]:
-    return _help_service._iter_gui_help_candidates()
-
-
 def _load_gui_help_text_from_candidates() -> str:
-    return _help_service._load_gui_help_text_from_candidates()
+    return _help_service.get_gui_help_text()
 
 
 
